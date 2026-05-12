@@ -1,6 +1,6 @@
 {
-  "name": "App",
-  "short_name": "App",
+  "name": "Coach Planning",
+  "short_name": "Coach",
   "start_url": "index.html",
   "display": "standalone",
   "icons": [{
@@ -8,6 +8,6 @@
     "sizes": "512x512",
     "type": "image/png"
   }],
-  "background_color": "#31d53d",
-  "theme_color": "#31d53d"
+  "background_color": "#f4f7f2",
+  "theme_color": "#10231f"
 }

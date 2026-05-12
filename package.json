@@ -1,7 +1,7 @@
 {
-  "name": "capacitor-app",
+  "name": "coach-planning",
   "version": "1.0.0",
-  "description": "An Amazing Capacitor App",
+  "description": "Application mobile de planning d'entrainement",
   "type": "module",
   "keywords": [
     "capacitor",

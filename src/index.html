@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="en" dir="ltr">
+<html lang="fr" dir="ltr">
   <head>
     <meta charset="UTF-8" />
-    <title>Awesome Capacitor App</title>
+    <title>Coach Planning</title>
     <meta
       name="viewport"
       content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
@@ -10,23 +10,130 @@
     <meta name="format-detection" content="telephone=no" />
     <meta name="msapplication-tap-highlight" content="no" />
 
-    <script
-      type="module"
-      src="https://unpkg.com/@ionic/pwa-elements@latest/dist/ionicpwaelements/ionicpwaelements.esm.js"
-    ></script>
-    <script
-      nomodule
-      src="https://unpkg.com/@ionic/pwa-elements@latest/dist/ionicpwaelements/ionicpwaelements.js"
-    ></script>
-
     <link rel="icon" type="image/x-icon" href="./assets/icon/favicon.ico" />
     <link rel="manifest" href="./manifest.json" />
     <link rel="stylesheet" href="./css/style.css" />
-    <meta name="theme-color" content="#31d53d" />
+    <meta name="theme-color" content="#10231f" />
   </head>
   <body>
-    <capacitor-welcome></capacitor-welcome>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Coach Planning</p>
+          <h1 id="page-title">Accueil</h1>
+        </div>
+        <div class="week-pill">
+          <span id="session-count">0</span>
+          <span>seance</span>
+        </div>
+      </header>
 
-    <script src="./js/capacitor-welcome.js" type="module"></script>
+      <section class="page page-active" id="home-page" data-title="Accueil">
+        <div class="summary-panel">
+          <p class="panel-label">Prochaine seance</p>
+          <h2 id="next-session-title">Aucune seance prevue</h2>
+          <p id="next-session-meta">Ajoute ta premiere seance pour construire ton planning.</p>
+        </div>
+
+        <div class="stats-grid">
+          <article>
+            <span id="week-total">0</span>
+            <p>cette semaine</p>
+          </article>
+          <article>
+            <span id="total-duration">0 min</span>
+            <p>duree totale</p>
+          </article>
+        </div>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <h2>A venir</h2>
+            <button class="link-button" type="button" data-nav="sessions">Voir tout</button>
+          </div>
+          <div class="session-list compact-list" id="upcoming-list"></div>
+        </section>
+      </section>
+
+      <section class="page" id="sessions-page" data-title="Seances">
+        <form class="session-form" id="session-form">
+          <label>
+            <span>Titre</span>
+            <input id="session-title" name="title" type="text" placeholder="Ex: Haut du corps" required />
+          </label>
+
+          <div class="form-row">
+            <label>
+              <span>Date</span>
+              <input id="session-date" name="date" type="date" required />
+            </label>
+            <label>
+              <span>Duree</span>
+              <input id="session-duration" name="duration" type="number" min="1" step="5" placeholder="45" required />
+            </label>
+          </div>
+
+          <label>
+            <span>Type</span>
+            <select id="session-type" name="type" required>
+              <option value="Musculation">Musculation</option>
+              <option value="Cardio">Cardio</option>
+              <option value="Mobilite">Mobilite</option>
+              <option value="Recovery">Recovery</option>
+              <option value="Autre">Autre</option>
+            </select>
+          </label>
+
+          <label>
+            <span>Commentaire</span>
+            <textarea id="session-comment" name="comment" rows="3" placeholder="Objectif, intensite, notes..."></textarea>
+          </label>
+
+          <button class="primary-button" type="submit">Ajouter la seance</button>
+        </form>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <h2>Mes seances</h2>
+            <span id="sessions-empty-hint">localStorage</span>
+          </div>
+          <div class="session-list" id="sessions-list"></div>
+        </section>
+      </section>
+
+      <section class="page" id="calendar-page" data-title="Calendrier">
+        <div class="calendar-panel">
+          <div class="calendar-head">
+            <h2 id="calendar-month">Mois</h2>
+            <span id="calendar-total">0 seance</span>
+          </div>
+          <div class="calendar-grid" id="calendar-grid"></div>
+        </div>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <h2>Planning date</h2>
+          </div>
+          <div class="session-list compact-list" id="calendar-list"></div>
+        </section>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Navigation principale">
+      <button class="nav-item nav-active" type="button" data-nav="home">
+        <span class="nav-icon">⌂</span>
+        <span>Accueil</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="sessions">
+        <span class="nav-icon">＋</span>
+        <span>Seances</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="calendar">
+        <span class="nav-icon">□</span>
+        <span>Calendrier</span>
+      </button>
+    </nav>
+
+    <script src="./js/app.js" type="module"></script>
   </body>
 </html>
