@@ -1,10 +1,10 @@
-{
+﻿{
   "appId": "fr.gestionmarine.coach",
   "appName": "Coach",
   "webDir": "dist",
   "plugins": {
     "SplashScreen": {
-      "launchAutoHide": false
+      "launchAutoHide": true
     }
   }
 }

@@ -2,52 +2,75 @@ const STORAGE_KEY = 'coach.sessions.v1';
 
 const state = {
   activePage: 'home',
-  sessions: loadSessions(),
+  sessions: [],
 };
 
-const pages = {
-  home: document.querySelector('#home-page'),
-  sessions: document.querySelector('#sessions-page'),
-  calendar: document.querySelector('#calendar-page'),
-};
+let pages = {};
+let form;
+let today;
 
-const form = document.querySelector('#session-form');
-const today = new Date();
+initApp();
 
-document.querySelector('#session-date').value = toInputDate(today);
+function initApp() {
+  today = new Date();
+  state.sessions = loadSessions();
 
-document.querySelectorAll('[data-nav]').forEach((button) => {
-  button.addEventListener('click', () => navigate(button.dataset.nav));
-});
-
-form.addEventListener('submit', (event) => {
-  event.preventDefault();
-
-  const formData = new FormData(form);
-  const session = {
-    id: crypto.randomUUID(),
-    title: String(formData.get('title')).trim(),
-    date: String(formData.get('date')),
-    type: String(formData.get('type')),
-    duration: Number(formData.get('duration')),
-    comment: String(formData.get('comment')).trim(),
-    createdAt: new Date().toISOString(),
+  pages = {
+    home: document.querySelector('#home-page'),
+    sessions: document.querySelector('#sessions-page'),
+    calendar: document.querySelector('#calendar-page'),
   };
 
-  if (!session.title || !session.date || !session.duration) {
+  form = document.querySelector('#session-form');
+  const dateInput = document.querySelector('#session-date');
+
+  if (!form || !pages.home || !pages.sessions || !pages.calendar || !dateInput) {
+    showStartupError();
     return;
   }
 
-  state.sessions = sortSessions([...state.sessions, session]);
+  dateInput.value = toInputDate(today);
+
+  document.querySelectorAll('[data-nav]').forEach((button) => {
+    button.addEventListener('click', () => navigate(button.dataset.nav));
+  });
+
+  form.addEventListener('submit', handleSessionSubmit);
+  render();
+}
+
+function handleSessionSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(form);
+  const duration = Number(formData.get('duration'));
+  const session = {
+    id: createId(),
+    title: String(formData.get('title') || '').trim(),
+    date: String(formData.get('date') || ''),
+    type: String(formData.get('type') || 'Autre'),
+    duration,
+    comment: String(formData.get('comment') || '').trim(),
+    createdAt: new Date().toISOString(),
+  };
+
+  if (!session.title || !session.date || !Number.isFinite(duration) || duration <= 0) {
+    return;
+  }
+
+  state.sessions = sortSessions(state.sessions.concat(session));
   saveSessions(state.sessions);
   form.reset();
   document.querySelector('#session-date').value = toInputDate(today);
   render();
-});
-
-render();
+  navigate('sessions');
+}
 
 function navigate(pageName) {
+  if (!pages[pageName]) {
+    return;
+  }
+
   state.activePage = pageName;
 
   Object.entries(pages).forEach(([name, page]) => {
@@ -58,7 +81,7 @@ function navigate(pageName) {
     item.classList.toggle('nav-active', item.dataset.nav === pageName);
   });
 
-  document.querySelector('#page-title').textContent = pages[pageName].dataset.title;
+  document.querySelector('#page-title').textContent = pages[pageName].dataset.title || 'Accueil';
 }
 
 function render() {
@@ -75,7 +98,8 @@ function renderHeader() {
 }
 
 function renderHome() {
-  const upcoming = state.sessions.filter((session) => dateOnly(session.date) >= dateOnly(toInputDate(today)));
+  const todayTime = dateOnly(toInputDate(today));
+  const upcoming = state.sessions.filter((session) => dateOnly(session.date) >= todayTime);
   const nextSession = upcoming[0];
   const weekTotal = state.sessions.filter(isThisWeek).length;
   const totalDuration = state.sessions.reduce((total, session) => total + session.duration, 0);
@@ -85,7 +109,7 @@ function renderHome() {
 
   if (nextSession) {
     document.querySelector('#next-session-title').textContent = nextSession.title;
-    document.querySelector('#next-session-meta').textContent = `${formatDate(nextSession.date)} · ${nextSession.type} · ${nextSession.duration} min`;
+    document.querySelector('#next-session-meta').textContent = `${formatDate(nextSession.date)} - ${nextSession.type} - ${nextSession.duration} min`;
   } else {
     document.querySelector('#next-session-title').textContent = 'Aucune seance prevue';
     document.querySelector('#next-session-meta').textContent = 'Ajoute ta premiere seance pour construire ton planning.';
@@ -104,10 +128,10 @@ function renderCalendar() {
   const days = new Date(year, month + 1, 0).getDate();
   const firstDay = new Date(year, month, 1).getDay();
   const monthSessions = state.sessions.filter((session) => {
-    const date = new Date(`${session.date}T00:00:00`);
-    return date.getFullYear() === year && date.getMonth() === month;
+    const sessionDate = parseSessionDate(session.date);
+    return sessionDate && sessionDate.getFullYear() === year && sessionDate.getMonth() === month;
   });
-  const sessionsByDay = groupBy(monthSessions, (session) => new Date(`${session.date}T00:00:00`).getDate());
+  const sessionsByDay = groupBy(monthSessions, (session) => parseSessionDate(session.date).getDate());
   const grid = document.querySelector('#calendar-grid');
 
   document.querySelector('#calendar-month').textContent = today.toLocaleDateString('fr-FR', {
@@ -131,10 +155,11 @@ function renderCalendar() {
     const cell = createElement('div', 'calendar-day', String(day));
     cell.classList.toggle('has-session', sessions.length > 0);
     cell.classList.toggle('is-today', day === today.getDate());
+
     if (sessions.length > 0) {
-      const badge = createElement('span', 'day-badge', String(sessions.length));
-      cell.append(badge);
+      cell.append(createElement('span', 'day-badge', String(sessions.length)));
     }
+
     grid.append(cell);
   }
 
@@ -151,14 +176,18 @@ function renderSessionList(container, sessions, emptyMessage) {
 
   sessions.forEach((session) => {
     const item = createElement('article', 'session-card');
-    item.innerHTML = `
-      <div>
-        <p class="session-date">${formatDate(session.date)} · ${session.type}</p>
-        <h3>${escapeHtml(session.title)}</h3>
-        ${session.comment ? `<p class="session-comment">${escapeHtml(session.comment)}</p>` : ''}
-      </div>
-      <span class="duration">${session.duration} min</span>
-    `;
+    const content = createElement('div', 'session-content', '');
+    const meta = createElement('p', 'session-date', `${formatDate(session.date)} - ${session.type}`);
+    const title = createElement('h3', '', session.title);
+    const duration = createElement('span', 'duration', `${session.duration} min`);
+
+    content.append(meta, title);
+
+    if (session.comment) {
+      content.append(createElement('p', 'session-comment', session.comment));
+    }
+
+    item.append(content, duration);
     container.append(item);
   });
 }
@@ -166,22 +195,43 @@ function renderSessionList(container, sessions, emptyMessage) {
 function loadSessions() {
   try {
     const value = localStorage.getItem(STORAGE_KEY);
-    return value ? sortSessions(JSON.parse(value)) : [];
-  } catch {
+    const parsed = value ? JSON.parse(value) : [];
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return sortSessions(parsed.map(normalizeSession).filter(Boolean));
+  } catch (error) {
     return [];
   }
 }
 
 function saveSessions(sessions) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+  } catch (error) {
+    // Keep the UI usable even if storage is temporarily unavailable.
+  }
 }
 
 function sortSessions(sessions) {
-  return sessions.sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+  return sessions.sort((a, b) => {
+    const dateCompare = String(a.date).localeCompare(String(b.date));
+    if (dateCompare !== 0) {
+      return dateCompare;
+    }
+
+    return String(a.createdAt).localeCompare(String(b.createdAt));
+  });
 }
 
 function isThisWeek(session) {
-  const sessionDate = new Date(`${session.date}T00:00:00`);
+  const sessionDate = parseSessionDate(session.date);
+  if (!sessionDate) {
+    return false;
+  }
+
   const current = new Date(today);
   const day = current.getDay() || 7;
   const weekStart = new Date(current);
@@ -205,7 +255,12 @@ function groupBy(items, getKey) {
 }
 
 function formatDate(date) {
-  return new Date(`${date}T00:00:00`).toLocaleDateString('fr-FR', {
+  const parsedDate = parseSessionDate(date);
+  if (!parsedDate) {
+    return 'Date inconnue';
+  }
+
+  return parsedDate.toLocaleDateString('fr-FR', {
     weekday: 'short',
     day: 'numeric',
     month: 'short',
@@ -213,7 +268,13 @@ function formatDate(date) {
 }
 
 function dateOnly(date) {
-  return new Date(`${date}T00:00:00`).getTime();
+  const parsedDate = parseSessionDate(date);
+  return parsedDate ? parsedDate.getTime() : 0;
+}
+
+function parseSessionDate(date) {
+  const parsedDate = new Date(`${date}T00:00:00`);
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
 }
 
 function toInputDate(date) {
@@ -222,16 +283,46 @@ function toInputDate(date) {
 
 function createElement(tagName, className, textContent) {
   const element = document.createElement(tagName);
-  element.className = className;
+
+  if (className) {
+    element.className = className;
+  }
+
   element.textContent = textContent;
   return element;
 }
 
-function escapeHtml(value) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
+function createId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+
+  return `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeSession(session) {
+  if (!session || typeof session !== 'object') {
+    return null;
+  }
+
+  const duration = Number(session.duration);
+  const normalized = {
+    id: String(session.id || createId()),
+    title: String(session.title || '').trim(),
+    date: String(session.date || ''),
+    type: String(session.type || 'Autre'),
+    duration: Number.isFinite(duration) ? duration : 0,
+    comment: String(session.comment || '').trim(),
+    createdAt: String(session.createdAt || new Date().toISOString()),
+  };
+
+  if (!normalized.title || !normalized.date || normalized.duration <= 0 || !parseSessionDate(normalized.date)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function showStartupError() {
+  document.body.innerHTML = '<main class="app-shell"><h1>Accueil</h1><p class="empty-state">Impossible de charger l interface.</p></main>';
 }

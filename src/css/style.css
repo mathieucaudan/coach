@@ -42,9 +42,12 @@ button {
 }
 
 .app-shell {
-  width: min(100%, 520px);
+  width: 100%;
+  max-width: 520px;
   min-height: 100vh;
-  padding: calc(env(safe-area-inset-top) + 24px) 18px calc(env(safe-area-inset-bottom) + 96px);
+  padding: 24px 18px 96px;
+  padding-top: calc(env(safe-area-inset-top, 0px) + 24px);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
   margin: 0 auto;
 }
 
@@ -326,7 +329,7 @@ textarea:focus {
   display: grid;
   place-items: center;
   min-width: 0;
-  aspect-ratio: 1;
+  min-height: 42px;
   border-radius: 8px;
   font-size: 0.85rem;
 }
@@ -378,12 +381,13 @@ textarea:focus {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
-  width: min(100%, 520px);
-  padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+  width: 100%;
+  max-width: 520px;
+  padding: 10px 12px;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
   margin: 0 auto;
   border-top: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(18px);
 }
 
 .nav-item {
