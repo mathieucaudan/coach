@@ -1,12 +1,248 @@
-﻿<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Coach</title>
-</head>
-<body>
-  <h1>Coach App fonctionne</h1>
-  <p>Si tu vois cette page, Capacitor et Android marchent.</p>
-</body>
+<!doctype html>
+<html lang="fr" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Coach</title>
+    <meta
+      name="viewport"
+      content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="msapplication-tap-highlight" content="no" />
+    <meta name="theme-color" content="#090d12" />
+    <link rel="icon" type="image/x-icon" href="./assets/icon/favicon.ico" />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="stylesheet" href="./css/style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow" id="header-eyebrow">Coach App</p>
+          <h1 id="page-title">Bienvenue</h1>
+        </div>
+      </header>
+
+      <section class="page page-active" id="onboarding-page" data-title="Bienvenue">
+        <section class="hero-panel">
+          <p class="panel-label">MVP local</p>
+          <h2>Planifie les entrainements de tes athletes.</h2>
+          <p>Creer ton espace coach, ajoute jusqu'a 3 athletes gratuitement, puis gere un calendrier separe pour chacun.</p>
+          <button class="primary-button" type="button" data-nav="coach-form">Creer mon compte coach</button>
+        </section>
+      </section>
+
+      <section class="page" id="coach-form-page" data-title="Compte coach">
+        <form class="form-card" id="coach-form">
+          <label>
+            <span>Prenom</span>
+            <input name="firstName" type="text" autocomplete="given-name" required />
+          </label>
+          <label>
+            <span>Nom</span>
+            <input name="lastName" type="text" autocomplete="family-name" required />
+          </label>
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            <span>Structure / club optionnel</span>
+            <input name="club" type="text" autocomplete="organization" />
+          </label>
+          <button class="primary-button" type="submit">Creer le compte</button>
+        </form>
+      </section>
+
+      <section class="page" id="dashboard-page" data-title="Dashboard">
+        <section class="coach-card">
+          <p class="panel-label">Coach</p>
+          <h2 id="coach-name">-</h2>
+          <p id="coach-meta">Compte local gratuit</p>
+        </section>
+
+        <section class="stats-grid">
+          <article class="stat-card">
+            <span id="athlete-count">0</span>
+            <p>athletes crees</p>
+          </article>
+          <article class="stat-card">
+            <span>3</span>
+            <p>limite gratuite</p>
+          </article>
+          <article class="stat-card">
+            <span id="planned-count">0</span>
+            <p>seances a venir</p>
+          </article>
+          <article class="stat-card">
+            <span id="missing-count">0</span>
+            <p>rappels coach</p>
+          </article>
+        </section>
+
+        <div class="notice" id="limit-message" hidden>
+          Limite gratuite atteinte. L'abonnement permettra d'ajouter plus d'athletes.
+        </div>
+
+        <section class="content-section">
+          <h2>Vision globale</h2>
+          <div class="card-list" id="coach-overview"></div>
+        </section>
+
+        <section class="content-section">
+          <h2>Rappels manque de seance</h2>
+          <div class="card-list" id="coach-reminders"></div>
+        </section>
+
+        <div class="toolbar">
+          <h2>Mes athletes</h2>
+          <button class="secondary-button" id="open-athlete-form" type="button">Ajouter un athlete</button>
+        </div>
+        <div class="card-list" id="athlete-list"></div>
+      </section>
+
+      <section class="page" id="athlete-form-page" data-title="Nouvel athlete">
+        <form class="form-card" id="athlete-form">
+          <label>
+            <span>Prenom</span>
+            <input name="firstName" type="text" required />
+          </label>
+          <label>
+            <span>Nom</span>
+            <input name="lastName" type="text" required />
+          </label>
+          <div class="form-row">
+            <label>
+              <span>Sport</span>
+              <input name="sport" type="text" placeholder="Course, fitness..." required />
+            </label>
+            <label>
+              <span>Niveau</span>
+              <select name="level" required>
+                <option value="Debutant">Debutant</option>
+                <option value="Intermediaire">Intermediaire</option>
+                <option value="Avance">Avance</option>
+                <option value="Competition">Competition</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>Objectif principal</span>
+            <input name="goal" type="text" placeholder="Perte de poids, marathon, force..." required />
+          </label>
+          <label>
+            <span>VMA en km/h</span>
+            <input name="vma" type="number" min="5" max="30" step="0.1" placeholder="Ex: 16.5" required />
+          </label>
+          <label>
+            <span>Commentaire</span>
+            <textarea name="comment" rows="4" placeholder="Contraintes, blessures, preferences..."></textarea>
+          </label>
+          <div class="form-actions">
+            <button class="ghost-button" type="button" data-nav="dashboard">Annuler</button>
+            <button class="primary-button" type="submit">Ajouter</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="page" id="athlete-detail-page" data-title="Athlete">
+        <section class="athlete-profile">
+          <p class="panel-label" id="athlete-sport">Athlete</p>
+          <h2 id="athlete-name">-</h2>
+          <p id="athlete-info">-</p>
+          <div class="metric-grid" id="athlete-metrics"></div>
+          <p id="athlete-comment"></p>
+        </section>
+
+        <section class="content-section">
+          <h2>Allures VMA</h2>
+          <div class="pace-grid" id="pace-grid"></div>
+        </section>
+
+        <div class="toolbar">
+          <h2>Calendrier</h2>
+          <button class="secondary-button" type="button" data-nav="session-form">Ajouter une seance</button>
+        </div>
+
+        <section class="calendar-panel">
+          <div class="calendar-head">
+            <h2 id="calendar-month">Mois</h2>
+            <span id="session-count">0 seance</span>
+          </div>
+          <div class="calendar-grid" id="calendar-grid"></div>
+        </section>
+
+        <section class="content-section">
+          <h2>Seances de cet athlete</h2>
+          <div class="card-list" id="session-list"></div>
+        </section>
+      </section>
+
+      <section class="page" id="session-form-page" data-title="Nouvelle seance">
+        <form class="form-card" id="session-form">
+          <label>
+            <span>Titre</span>
+            <input name="title" type="text" placeholder="Ex: Seance vitesse" required />
+          </label>
+          <div class="form-row">
+            <label>
+              <span>Date</span>
+              <input id="session-date" name="date" type="date" required />
+            </label>
+            <label>
+              <span>Duree</span>
+              <input name="duration" type="number" min="1" step="5" placeholder="45" required />
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              <span>Type de seance</span>
+              <select name="type" required>
+                <option value="Technique">Technique</option>
+                <option value="Force">Force</option>
+                <option value="Cardio">Cardio</option>
+                <option value="Mobilite">Mobilite</option>
+                <option value="Recuperation">Recuperation</option>
+              </select>
+            </label>
+            <label>
+              <span>Intensite</span>
+              <select name="intensity" required>
+                <option value="Faible">Faible</option>
+                <option value="Moderee" selected>Moderee</option>
+                <option value="Forte">Forte</option>
+                <option value="Maximale">Maximale</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              <span>% VMA cible</span>
+              <input name="vmaPercent" type="number" min="40" max="130" step="1" placeholder="Ex: 85" />
+            </label>
+            <label>
+              <span>Ressenti athlete / 10</span>
+              <input name="feeling" type="number" min="1" max="10" step="1" placeholder="Ex: 7" />
+            </label>
+          </div>
+          <label>
+            <span>Commentaire</span>
+            <textarea name="comment" rows="4" placeholder="Consignes, charges, adaptations..."></textarea>
+          </label>
+          <div class="form-actions">
+            <button class="ghost-button" id="cancel-session" type="button">Annuler</button>
+            <button class="primary-button" type="submit">Ajouter</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" id="bottom-nav" aria-label="Navigation principale" hidden>
+      <button class="nav-item nav-active" type="button" data-nav="dashboard">Dashboard</button>
+      <button class="nav-item" type="button" data-nav="athlete-form">Athlete</button>
+      <button class="nav-item" type="button" data-current-athlete>Calendrier</button>
+    </nav>
+
+    <script src="./js/app.js" type="module"></script>
+  </body>
 </html>
