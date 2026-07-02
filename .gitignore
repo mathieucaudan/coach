@@ -6,3 +6,5 @@ node_modules/
 .sourcemaps
 dist/
 _legacy_hostinger/
+public_html/config.php
+public_html/uploads/
