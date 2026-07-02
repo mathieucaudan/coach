@@ -124,6 +124,15 @@ body{
     font-weight:700
 }
 
+.nav-user{
+    color:#64748b;
+    font-weight:800
+}
+
+.logout-button{
+    white-space:nowrap
+}
+
 .container{
     max-width:1180px;
     margin:24px auto;

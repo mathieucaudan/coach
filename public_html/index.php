@@ -5,6 +5,11 @@ require_once __DIR__ . '/functions.php';
 $page = $_GET['page'] ?? 'home';
 $action = $_POST['action'] ?? null;
 
+if ($page === 'logout') {
+    logout_user();
+    redirect('index.php?page=login');
+}
+
 try {
 if ($action) {
     verify_csrf();
@@ -30,7 +35,7 @@ if ($action) {
     }
 
     if ($action === 'logout') {
-        session_destroy();
+        logout_user();
         redirect('index.php?page=login');
     }
 
@@ -254,7 +259,7 @@ function header_html(string $title): void {
     <div class="brand"><?=APP_NAME?></div>
 
     <nav class="nav">
-        <span><?=e($u['name'])?> · <?=e($u['role'])?></span>
+        <span class="nav-user"><?=e($u['name'])?> · <?=e($u['role'])?></span>
 
         <?php if($u['role'] === 'coach'): ?>
             <a href="index.php?page=dashboard">Athlètes</a>
@@ -266,7 +271,7 @@ function header_html(string $title): void {
         <form method="post">
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="logout">
-            <button class="btn secondary small">Déconnexion</button>
+            <button class="btn danger small logout-button" type="submit">Déconnexion</button>
         </form>
     </nav>
 </header>
