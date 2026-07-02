@@ -113,6 +113,7 @@ h3 {
 .athlete-card,
 .overview-card,
 .reminder-card,
+.alert-card,
 .metric-card,
 .pace-card,
 .session-card {
@@ -235,7 +236,8 @@ h3 {
 
 .primary-button,
 .secondary-button,
-.ghost-button {
+.ghost-button,
+.danger-button {
   min-height: 48px;
   border-radius: 15px;
   padding: 0 16px;
@@ -256,6 +258,11 @@ h3 {
   border: 1px solid var(--line);
   background: transparent;
   color: var(--ink);
+}
+
+.danger-button {
+  background: rgba(251, 113, 133, 0.14);
+  color: #fecdd3;
 }
 
 .form-card {
@@ -340,6 +347,16 @@ textarea:focus {
 .pill-muted {
   background: rgba(149, 163, 184, 0.12);
   color: #cbd5e1;
+}
+
+.pill-warning {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fde68a;
+}
+
+.pill-danger {
+  background: rgba(251, 113, 133, 0.14);
+  color: #fecdd3;
 }
 
 .pill-row {
@@ -430,7 +447,8 @@ textarea:focus {
 }
 
 .overview-card,
-.reminder-card {
+.reminder-card,
+.alert-card {
   display: grid;
   gap: 7px;
   padding: 15px;
@@ -439,6 +457,33 @@ textarea:focus {
 .reminder-card {
   border-color: rgba(251, 191, 36, 0.45);
   background: rgba(251, 191, 36, 0.08);
+}
+
+.alert-card {
+  border-color: rgba(251, 113, 133, 0.45);
+  background: rgba(251, 113, 133, 0.08);
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.small-button {
+  min-height: 38px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink);
+  padding: 0 12px;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.danger-small-button {
+  background: rgba(251, 113, 133, 0.14);
+  color: #fecdd3;
 }
 
 .empty-state {

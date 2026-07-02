@@ -78,6 +78,14 @@
             <span id="missing-count">0</span>
             <p>rappels coach</p>
           </article>
+          <article class="stat-card">
+            <span id="done-count">0</span>
+            <p>seances realisees</p>
+          </article>
+          <article class="stat-card">
+            <span id="alert-count">0</span>
+            <p>alertes fatigue</p>
+          </article>
         </section>
 
         <div class="notice" id="limit-message" hidden>
@@ -94,6 +102,11 @@
           <div class="card-list" id="coach-reminders"></div>
         </section>
 
+        <section class="content-section">
+          <h2>Alertes fatigue</h2>
+          <div class="card-list" id="coach-alerts"></div>
+        </section>
+
         <div class="toolbar">
           <h2>Mes athletes</h2>
           <button class="secondary-button" id="open-athlete-form" type="button">Ajouter un athlete</button>
@@ -101,8 +114,9 @@
         <div class="card-list" id="athlete-list"></div>
       </section>
 
-      <section class="page" id="athlete-form-page" data-title="Nouvel athlete">
+      <section class="page" id="athlete-form-page" data-title="Athlete">
         <form class="form-card" id="athlete-form">
+          <h2 id="athlete-form-title">Nouvel athlete</h2>
           <label>
             <span>Prenom</span>
             <input name="firstName" type="text" required />
@@ -140,7 +154,7 @@
           </label>
           <div class="form-actions">
             <button class="ghost-button" type="button" data-nav="dashboard">Annuler</button>
-            <button class="primary-button" type="submit">Ajouter</button>
+            <button class="primary-button" id="athlete-submit-label" type="submit">Ajouter</button>
           </div>
         </form>
       </section>
@@ -152,6 +166,10 @@
           <p id="athlete-info">-</p>
           <div class="metric-grid" id="athlete-metrics"></div>
           <p id="athlete-comment"></p>
+          <div class="form-actions">
+            <button class="secondary-button" id="edit-athlete" type="button">Modifier</button>
+            <button class="danger-button" id="delete-athlete" type="button">Supprimer</button>
+          </div>
         </section>
 
         <section class="content-section">
@@ -178,8 +196,9 @@
         </section>
       </section>
 
-      <section class="page" id="session-form-page" data-title="Nouvelle seance">
+      <section class="page" id="session-form-page" data-title="Seance">
         <form class="form-card" id="session-form">
+          <h2 id="session-form-title">Nouvelle seance</h2>
           <label>
             <span>Titre</span>
             <input name="title" type="text" placeholder="Ex: Seance vitesse" required />
@@ -215,6 +234,15 @@
               </select>
             </label>
           </div>
+          <label>
+            <span>Statut</span>
+            <select name="status" required>
+              <option value="Planifiee" selected>Planifiee</option>
+              <option value="Realisee">Realisee</option>
+              <option value="Manquee">Manquee</option>
+              <option value="Annulee">Annulee</option>
+            </select>
+          </label>
           <div class="form-row">
             <label>
               <span>% VMA cible</span>
@@ -225,13 +253,27 @@
               <input name="feeling" type="number" min="1" max="10" step="1" placeholder="Ex: 7" />
             </label>
           </div>
+          <div class="form-row">
+            <label>
+              <span>Duree reelle</span>
+              <input name="actualDuration" type="number" min="1" step="5" placeholder="Optionnel" />
+            </label>
+            <label>
+              <span>Douleur / fatigue / 10</span>
+              <input name="pain" type="number" min="0" max="10" step="1" placeholder="Ex: 2" />
+            </label>
+          </div>
           <label>
-            <span>Commentaire</span>
+            <span>Consignes coach</span>
             <textarea name="comment" rows="4" placeholder="Consignes, charges, adaptations..."></textarea>
+          </label>
+          <label>
+            <span>Retour athlete</span>
+            <textarea name="athleteFeedback" rows="4" placeholder="Ressenti, fatigue, douleur, adaptation..."></textarea>
           </label>
           <div class="form-actions">
             <button class="ghost-button" id="cancel-session" type="button">Annuler</button>
-            <button class="primary-button" type="submit">Ajouter</button>
+            <button class="primary-button" id="session-submit-label" type="submit">Ajouter</button>
           </div>
         </form>
       </section>

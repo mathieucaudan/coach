@@ -3,11 +3,15 @@ const FREE_ATHLETE_LIMIT = 3;
 const DEFAULT_VMA = 15;
 const MISSING_SESSION_DAYS = 7;
 const VMA_PACE_PERCENTAGES = [60, 70, 80, 90, 100, 105];
+const SESSION_STATUSES = ['Planifiee', 'Realisee', 'Manquee', 'Annulee'];
+const FATIGUE_ALERT_THRESHOLD = 7;
 
 const state = {
   coach: null,
   athletes: [],
   selectedAthleteId: null,
+  editingAthleteId: null,
+  editingSessionId: null,
 };
 
 const pages = {};
@@ -45,7 +49,12 @@ function bindEvents() {
   document.querySelector('#athlete-form').addEventListener('submit', handleAthleteSubmit);
   document.querySelector('#session-form').addEventListener('submit', handleSessionSubmit);
   document.querySelector('#open-athlete-form').addEventListener('click', openAthleteForm);
-  document.querySelector('#cancel-session').addEventListener('click', () => navigate('athleteDetail'));
+  document.querySelector('#cancel-session').addEventListener('click', () => {
+    state.editingSessionId = null;
+    navigate('athleteDetail');
+  });
+  document.querySelector('#edit-athlete').addEventListener('click', openAthleteEditForm);
+  document.querySelector('#delete-athlete').addEventListener('click', deleteSelectedAthlete);
 }
 
 function handleNavigation(pageName) {
@@ -59,6 +68,11 @@ function handleNavigation(pageName) {
   if (pageName === 'athlete-form') {
     openAthleteForm();
     return;
+  }
+
+  if (pageName === 'dashboard') {
+    state.editingAthleteId = null;
+    state.editingSessionId = null;
   }
 
   if (pageName === 'session-form') {
@@ -105,7 +119,7 @@ function handleAthleteSubmit(event) {
     return;
   }
 
-  if (state.athletes.length >= FREE_ATHLETE_LIMIT) {
+  if (!state.editingAthleteId && state.athletes.length >= FREE_ATHLETE_LIMIT) {
     renderLimitMessage();
     navigate('dashboard');
     return;
@@ -113,7 +127,7 @@ function handleAthleteSubmit(event) {
 
   const data = new FormData(event.currentTarget);
   const athlete = {
-    id: createId(),
+    id: state.editingAthleteId || createId(),
     firstName: clean(data.get('firstName')),
     lastName: clean(data.get('lastName')),
     sport: clean(data.get('sport')),
@@ -129,8 +143,23 @@ function handleAthleteSubmit(event) {
     return;
   }
 
-  state.athletes = state.athletes.concat(athlete);
+  if (state.editingAthleteId) {
+    state.athletes = state.athletes.map((item) =>
+      item.id === state.editingAthleteId
+        ? {
+            ...item,
+            ...athlete,
+            sessions: item.sessions,
+            createdAt: item.createdAt,
+          }
+        : item,
+    );
+  } else {
+    state.athletes = state.athletes.concat(athlete);
+  }
+
   state.selectedAthleteId = athlete.id;
+  state.editingAthleteId = null;
   saveState();
   event.currentTarget.reset();
   render();
@@ -158,16 +187,22 @@ function handleSessionSubmit(event) {
   const duration = Number(data.get('duration'));
   const vmaPercent = Number(data.get('vmaPercent'));
   const feeling = Number(data.get('feeling'));
+  const actualDuration = Number(data.get('actualDuration'));
+  const pain = Number(data.get('pain'));
   const session = {
-    id: createId(),
+    id: state.editingSessionId || createId(),
     title: clean(data.get('title')),
     date: clean(data.get('date')),
     type: clean(data.get('type')),
     duration,
     intensity: clean(data.get('intensity')),
+    status: clean(data.get('status')),
     vmaPercent: Number.isFinite(vmaPercent) && vmaPercent > 0 ? vmaPercent : null,
     feeling: Number.isFinite(feeling) && feeling > 0 ? feeling : null,
+    actualDuration: Number.isFinite(actualDuration) && actualDuration > 0 ? actualDuration : null,
+    pain: Number.isFinite(pain) && pain >= 0 ? pain : null,
     comment: clean(data.get('comment')),
+    athleteFeedback: clean(data.get('athleteFeedback')),
     createdAt: new Date().toISOString(),
   };
 
@@ -176,10 +211,12 @@ function handleSessionSubmit(event) {
     !session.date ||
     !session.type ||
     !session.intensity ||
+    !SESSION_STATUSES.includes(session.status) ||
     !Number.isFinite(duration) ||
     duration <= 0 ||
     (session.vmaPercent !== null && !isValidVmaPercent(session.vmaPercent)) ||
-    (session.feeling !== null && !isValidFeeling(session.feeling))
+    (session.feeling !== null && !isValidFeeling(session.feeling)) ||
+    (session.pain !== null && !isValidPain(session.pain))
   ) {
     return;
   }
@@ -191,10 +228,23 @@ function handleSessionSubmit(event) {
 
     return {
       ...item,
-      sessions: sortSessions(item.sessions.concat(session)),
+      sessions: state.editingSessionId
+        ? sortSessions(
+            item.sessions.map((existing) =>
+              existing.id === state.editingSessionId
+                ? {
+                    ...existing,
+                    ...session,
+                    createdAt: existing.createdAt,
+                  }
+                : existing,
+            ),
+          )
+        : sortSessions(item.sessions.concat(session)),
     };
   });
 
+  state.editingSessionId = null;
   saveState();
   event.currentTarget.reset();
   render();
@@ -215,8 +265,52 @@ function openAthleteForm() {
     return;
   }
 
-  document.querySelector('#athlete-form').reset();
+  state.editingAthleteId = null;
+  const form = document.querySelector('#athlete-form');
+  form.reset();
+  document.querySelector('#athlete-form-title').textContent = 'Nouvel athlete';
+  document.querySelector('#athlete-submit-label').textContent = 'Ajouter';
   navigate('athleteForm');
+}
+
+function openAthleteEditForm() {
+  enforceCoachGate();
+
+  const athlete = getSelectedAthlete();
+  if (!athlete) {
+    navigate('dashboard');
+    return;
+  }
+
+  state.editingAthleteId = athlete.id;
+  const form = document.querySelector('#athlete-form');
+  form.elements.firstName.value = athlete.firstName;
+  form.elements.lastName.value = athlete.lastName;
+  form.elements.sport.value = athlete.sport;
+  form.elements.level.value = athlete.level;
+  form.elements.goal.value = athlete.goal;
+  form.elements.vma.value = athlete.vma;
+  form.elements.comment.value = athlete.comment;
+  document.querySelector('#athlete-form-title').textContent = 'Modifier athlete';
+  document.querySelector('#athlete-submit-label').textContent = 'Enregistrer';
+  navigate('athleteForm');
+}
+
+function deleteSelectedAthlete() {
+  enforceCoachGate();
+
+  const athlete = getSelectedAthlete();
+  if (!athlete || !window.confirm(`Supprimer ${athlete.firstName} ${athlete.lastName} et toutes ses seances ?`)) {
+    return;
+  }
+
+  state.athletes = state.athletes.filter((item) => item.id !== athlete.id);
+  state.selectedAthleteId = state.athletes[0] ? state.athletes[0].id : null;
+  state.editingAthleteId = null;
+  state.editingSessionId = null;
+  saveState();
+  render();
+  navigate('dashboard');
 }
 
 function openSessionForm() {
@@ -233,9 +327,64 @@ function openSessionForm() {
   }
 
   const form = document.querySelector('#session-form');
+  state.editingSessionId = null;
   form.reset();
   document.querySelector('#session-date').value = toInputDate(today);
+  form.elements.status.value = 'Planifiee';
+  document.querySelector('#session-form-title').textContent = 'Nouvelle seance';
+  document.querySelector('#session-submit-label').textContent = 'Ajouter';
   navigate('sessionForm');
+}
+
+function openSessionEditForm(sessionId) {
+  enforceCoachGate();
+
+  const athlete = getSelectedAthlete();
+  const session = athlete && athlete.sessions.find((item) => item.id === sessionId);
+  if (!athlete || !session) {
+    navigate('athleteDetail');
+    return;
+  }
+
+  state.editingSessionId = session.id;
+  const form = document.querySelector('#session-form');
+  form.elements.title.value = session.title;
+  form.elements.date.value = session.date;
+  form.elements.duration.value = session.duration;
+  form.elements.type.value = session.type;
+  form.elements.intensity.value = session.intensity;
+  form.elements.status.value = session.status;
+  form.elements.vmaPercent.value = session.vmaPercent || '';
+  form.elements.feeling.value = session.feeling || '';
+  form.elements.actualDuration.value = session.actualDuration || '';
+  form.elements.pain.value = session.pain ?? '';
+  form.elements.comment.value = session.comment;
+  form.elements.athleteFeedback.value = session.athleteFeedback;
+  document.querySelector('#session-form-title').textContent = 'Modifier seance';
+  document.querySelector('#session-submit-label').textContent = 'Enregistrer';
+  navigate('sessionForm');
+}
+
+function deleteSession(sessionId) {
+  enforceCoachGate();
+
+  const athlete = getSelectedAthlete();
+  const session = athlete && athlete.sessions.find((item) => item.id === sessionId);
+  if (!athlete || !session || !window.confirm(`Supprimer la seance "${session.title}" ?`)) {
+    return;
+  }
+
+  state.athletes = state.athletes.map((item) =>
+    item.id === athlete.id
+      ? {
+          ...item,
+          sessions: item.sessions.filter((existing) => existing.id !== session.id),
+        }
+      : item,
+  );
+  state.editingSessionId = null;
+  saveState();
+  render();
 }
 
 function selectAthlete(id) {
@@ -317,9 +466,12 @@ function renderDashboard() {
   document.querySelector('#athlete-count').textContent = state.athletes.length;
   document.querySelector('#planned-count').textContent = getUpcomingSessions().length;
   document.querySelector('#missing-count').textContent = getMissingSessionReminders().length;
+  document.querySelector('#done-count').textContent = getSessionsByStatus('Realisee').length;
+  document.querySelector('#alert-count').textContent = getFatigueAlerts().length;
   renderLimitMessage();
   renderCoachOverview();
   renderCoachReminders();
+  renderCoachAlerts();
   renderAthleteList();
 }
 
@@ -370,6 +522,8 @@ function renderCoachOverview() {
   state.athletes.forEach((athlete) => {
     const nextSession = getNextSession(athlete);
     const averageFeeling = getAverageFeeling(athlete);
+    const weekLoad = getWeeklyLoad(athlete);
+    const latestReturn = getLatestReturnSession(athlete);
     const card = createElement('article', 'overview-card', '');
 
     card.append(
@@ -382,8 +536,16 @@ function renderCoachOverview() {
           ? `Prochaine seance : ${formatDate(nextSession.date)} - ${nextSession.title}`
           : `Aucune seance prevue dans les ${MISSING_SESSION_DAYS} prochains jours.`,
       ),
+      createElement(
+        'p',
+        'card-text',
+        latestReturn
+          ? `Dernier retour : ${getSessionStatusLabel(latestReturn.status)} - ressenti ${latestReturn.feeling || '-'}/10 - douleur ${latestReturn.pain ?? '-'}/10`
+          : 'Aucun retour post-seance.',
+      ),
       createPillRow([
         createElement('span', 'pill', `${athlete.sessions.length} seance${athlete.sessions.length > 1 ? 's' : ''}`),
+        createElement('span', 'pill', `${weekLoad} min cette semaine`),
         createElement('span', 'pill pill-muted', `VMA ${formatNumber(athlete.vma)} km/h`),
         createElement('span', 'pill pill-muted', averageFeeling ? `Ressenti moy. ${formatNumber(averageFeeling)}/10` : 'Ressenti non note'),
       ]),
@@ -420,6 +582,31 @@ function renderCoachReminders() {
   });
 }
 
+function renderCoachAlerts() {
+  const container = document.querySelector('#coach-alerts');
+  const alerts = getFatigueAlerts();
+  clearElement(container);
+
+  if (!hasCoachAccount() || alerts.length === 0) {
+    container.append(createElement('p', 'empty-state', 'Aucune alerte fatigue pour le moment.'));
+    return;
+  }
+
+  alerts.forEach(({ athlete, session }) => {
+    const card = createElement('article', 'alert-card', '');
+    card.append(
+      createElement('p', 'card-meta', 'Fatigue / douleur'),
+      createElement('h3', '', `${athlete.firstName} ${athlete.lastName}`),
+      createElement(
+        'p',
+        'card-text',
+        `${formatDate(session.date)} - ${session.title} - ressenti ${session.feeling || '-'}/10 - douleur ${session.pain ?? '-'}/10`,
+      ),
+    );
+    container.append(card);
+  });
+}
+
 function renderAthleteDetail() {
   if (!hasCoachAccount()) {
     clearAthleteDetail();
@@ -446,11 +633,15 @@ function renderAthleteDetail() {
 function renderAthleteMetrics(athlete) {
   const container = document.querySelector('#athlete-metrics');
   const averageFeeling = getAverageFeeling(athlete);
+  const weekLoad = getWeeklyLoad(athlete);
+  const doneSessions = athlete.sessions.filter((session) => session.status === 'Realisee').length;
   clearElement(container);
 
   container.append(
     createMetric('VMA', `${formatNumber(athlete.vma)} km/h`),
     createMetric('Ressenti moyen', averageFeeling ? `${formatNumber(averageFeeling)}/10` : '-'),
+    createMetric('Charge semaine', `${weekLoad} min`),
+    createMetric('Realisees', String(doneSessions)),
   );
 }
 
@@ -460,10 +651,12 @@ function renderPaceGrid(athlete) {
 
   VMA_PACE_PERCENTAGES.forEach((percent) => {
     const item = createElement('article', 'pace-card', '');
+    const pace = calculatePace(athlete.vma, percent);
     item.append(
       createElement('span', '', `${percent}%`),
-      createElement('strong', '', formatPace(calculatePace(athlete.vma, percent))),
+      createElement('strong', '', formatPace(pace)),
       createElement('p', '', `${formatNumber((athlete.vma * percent) / 100)} km/h`),
+      createElement('p', '', `400m ${formatSplit(pace, 0.4)} - 1000m ${formatSplit(pace, 1)}`),
     );
     container.append(item);
   });
@@ -524,11 +717,29 @@ function renderSessionList(athlete) {
     const card = createElement('article', 'session-card', '');
     const paceText = session.vmaPercent ? ` - ${session.vmaPercent}% VMA (${formatPace(calculatePace(athlete.vma, session.vmaPercent))})` : '';
     const feelingText = session.feeling ? ` - Ressenti ${session.feeling}/10` : '';
+    const actualText = session.actualDuration ? ` - Reel ${session.actualDuration} min` : '';
+    const painText = session.pain !== null ? ` - Douleur ${session.pain}/10` : '';
+    const feedbackText = session.athleteFeedback ? `Retour : ${session.athleteFeedback}` : '';
+    const actions = createElement('div', 'card-actions', '');
+    const editButton = createElement('button', 'small-button', 'Modifier');
+    const deleteButton = createElement('button', 'small-button danger-small-button', 'Supprimer');
+
+    editButton.type = 'button';
+    deleteButton.type = 'button';
+    editButton.addEventListener('click', () => openSessionEditForm(session.id));
+    deleteButton.addEventListener('click', () => deleteSession(session.id));
+    actions.append(editButton, deleteButton);
+
     card.append(
       createElement('p', 'card-meta', `${formatDate(session.date)} - ${session.type} - ${session.intensity}`),
       createElement('h3', '', session.title),
-      createElement('p', 'card-text', `${session.duration} min${paceText}${feelingText}${session.comment ? ` - ${session.comment}` : ''}`),
+      createPillRow([createElement('span', getStatusPillClass(session.status), getSessionStatusLabel(session.status))]),
+      createElement('p', 'card-text', `${session.duration} min prevus${actualText}${paceText}${feelingText}${painText}${session.comment ? ` - ${session.comment}` : ''}`),
     );
+    if (feedbackText) {
+      card.append(createElement('p', 'card-text', feedbackText));
+    }
+    card.append(actions);
     container.append(card);
   });
 }
@@ -650,6 +861,9 @@ function normalizeSession(session) {
   const duration = Number(session.duration);
   const vmaPercent = Number(session.vmaPercent);
   const feeling = Number(session.feeling);
+  const actualDuration = Number(session.actualDuration);
+  const pain = Number(session.pain);
+  const status = SESSION_STATUSES.includes(clean(session.status)) ? clean(session.status) : inferSessionStatus(session);
   const normalized = {
     id: String(session.id || createId()),
     title: clean(session.title),
@@ -657,13 +871,17 @@ function normalizeSession(session) {
     type: clean(session.type),
     duration: Number.isFinite(duration) ? duration : 0,
     intensity: clean(session.intensity),
+    status,
     vmaPercent: isValidVmaPercent(vmaPercent) ? vmaPercent : null,
     feeling: isValidFeeling(feeling) ? feeling : null,
+    actualDuration: Number.isFinite(actualDuration) && actualDuration > 0 ? actualDuration : null,
+    pain: isValidPain(pain) ? pain : null,
     comment: clean(session.comment),
+    athleteFeedback: clean(session.athleteFeedback),
     createdAt: String(session.createdAt || new Date().toISOString()),
   };
 
-  if (!normalized.title || !normalized.date || !normalized.type || !normalized.intensity || normalized.duration <= 0 || !parseDate(normalized.date)) {
+  if (!normalized.title || !normalized.date || !normalized.type || !normalized.intensity || !normalized.status || normalized.duration <= 0 || !parseDate(normalized.date)) {
     return null;
   }
 
@@ -678,14 +896,14 @@ function getUpcomingSessions() {
   const todayTime = dateOnly(toInputDate(today));
   return state.athletes.flatMap((athlete) =>
     athlete.sessions
-      .filter((session) => dateOnly(session.date) >= todayTime)
+      .filter((session) => session.status === 'Planifiee' && dateOnly(session.date) >= todayTime)
       .map((session) => ({ athlete, session })),
   );
 }
 
 function getNextSession(athlete) {
   const todayTime = dateOnly(toInputDate(today));
-  return sortSessions(athlete.sessions).find((session) => dateOnly(session.date) >= todayTime) || null;
+  return sortSessions(athlete.sessions).find((session) => session.status === 'Planifiee' && dateOnly(session.date) >= todayTime) || null;
 }
 
 function getLastSession(athlete) {
@@ -701,7 +919,7 @@ function getMissingSessionReminders() {
     .filter((athlete) => {
       const hasUpcomingSoon = athlete.sessions.some((session) => {
         const sessionTime = dateOnly(session.date);
-        return sessionTime >= todayTime && sessionTime <= limit;
+        return session.status === 'Planifiee' && sessionTime >= todayTime && sessionTime <= limit;
       });
       return !hasUpcomingSoon;
     })
@@ -718,6 +936,42 @@ function getAverageFeeling(athlete) {
   }
 
   return feelings.reduce((total, feeling) => total + feeling, 0) / feelings.length;
+}
+
+function getSessionsByStatus(status) {
+  return state.athletes.flatMap((athlete) =>
+    athlete.sessions
+      .filter((session) => session.status === status)
+      .map((session) => ({ athlete, session })),
+  );
+}
+
+function getFatigueAlerts() {
+  return state.athletes.flatMap((athlete) =>
+    athlete.sessions
+      .filter((session) => (session.feeling !== null && session.feeling >= FATIGUE_ALERT_THRESHOLD) || (session.pain !== null && session.pain >= FATIGUE_ALERT_THRESHOLD))
+      .map((session) => ({ athlete, session })),
+  );
+}
+
+function getWeeklyLoad(athlete) {
+  const weekStart = getWeekStart(today);
+  const weekEnd = addDays(weekStart, 6).getTime();
+
+  return athlete.sessions.reduce((total, session) => {
+    const sessionTime = dateOnly(session.date);
+    if (session.status === 'Annulee' || sessionTime < weekStart.getTime() || sessionTime > weekEnd) {
+      return total;
+    }
+
+    return total + (session.actualDuration || session.duration);
+  }, 0);
+}
+
+function getLatestReturnSession(athlete) {
+  return sortSessions(athlete.sessions)
+    .filter((session) => session.status !== 'Planifiee' || session.feeling !== null || session.pain !== null || session.athleteFeedback)
+    .pop() || null;
 }
 
 function sortSessions(sessions) {
@@ -739,6 +993,14 @@ function addDays(date, days) {
   next.setDate(next.getDate() + days);
   next.setHours(0, 0, 0, 0);
   return next;
+}
+
+function getWeekStart(date) {
+  const start = new Date(date);
+  const day = start.getDay() || 7;
+  start.setDate(start.getDate() - day + 1);
+  start.setHours(0, 0, 0, 0);
+  return start;
 }
 
 function formatDate(value) {
@@ -774,6 +1036,19 @@ function isValidFeeling(value) {
   return Number.isFinite(value) && value >= 1 && value <= 10;
 }
 
+function isValidPain(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 10;
+}
+
+function inferSessionStatus(session) {
+  const date = parseDate(session && session.date);
+  if (!date) {
+    return 'Planifiee';
+  }
+
+  return dateOnly(session.date) < dateOnly(toInputDate(today)) ? 'Realisee' : 'Planifiee';
+}
+
 function calculatePace(vma, percent) {
   if (!isValidVma(vma) || !isValidVmaPercent(percent)) {
     return null;
@@ -792,6 +1067,39 @@ function formatPace(minutesPerKm) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = String(totalSeconds % 60).padStart(2, '0');
   return `${minutes}'${seconds}/km`;
+}
+
+function formatSplit(minutesPerKm, distanceKm) {
+  if (!Number.isFinite(minutesPerKm) || minutesPerKm <= 0) {
+    return '-';
+  }
+
+  const totalSeconds = Math.round(minutesPerKm * distanceKm * 60);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return minutes > 0 ? `${minutes}'${seconds}` : `${seconds}s`;
+}
+
+function getSessionStatusLabel(status) {
+  const labels = {
+    Planifiee: 'Planifiee',
+    Realisee: 'Realisee',
+    Manquee: 'Manquee',
+    Annulee: 'Annulee',
+  };
+
+  return labels[status] || 'Planifiee';
+}
+
+function getStatusPillClass(status) {
+  const classes = {
+    Planifiee: 'pill pill-muted',
+    Realisee: 'pill',
+    Manquee: 'pill pill-warning',
+    Annulee: 'pill pill-danger',
+  };
+
+  return classes[status] || 'pill pill-muted';
 }
 
 function formatNumber(value) {
