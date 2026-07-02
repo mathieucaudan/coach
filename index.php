@@ -54,18 +54,17 @@ if ($action) {
 
         $userId = (int)db()->lastInsertId();
 
-        $stmt = db()->prepare('INSERT INTO athletes (coach_id,user_id,first_name,last_name,email,sport,level,goal,vma,notes) VALUES (?,?,?,?,?,?,?,?,?,?)');
-        $stmt->execute([
-            $user['id'],
-            $userId,
-            trim($_POST['first_name']),
-            trim($_POST['last_name']),
-            trim($_POST['email']),
-            trim($_POST['sport'] ?? 'Course'),
-            trim($_POST['level'] ?? 'Intermediaire'),
-            trim($_POST['goal'] ?? ''),
-            max(5, min(30, (float)($_POST['vma'] ?? 15))),
-            trim($_POST['notes'] ?? '')
+        db_insert('athletes', [
+            'coach_id' => $user['id'],
+            'user_id' => $userId,
+            'first_name' => trim($_POST['first_name']),
+            'last_name' => trim($_POST['last_name']),
+            'email' => trim($_POST['email']),
+            'sport' => trim($_POST['sport'] ?? 'Course'),
+            'level' => trim($_POST['level'] ?? 'Intermediaire'),
+            'goal' => trim($_POST['goal'] ?? ''),
+            'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
+            'notes' => trim($_POST['notes'] ?? '')
         ]);
 
         db()->commit();
@@ -80,19 +79,16 @@ if ($action) {
 
         if (!can_access_athlete($id)) exit('Accès refusé');
 
-        $stmt = db()->prepare('UPDATE athletes SET first_name=?, last_name=?, email=?, sport=?, level=?, goal=?, vma=?, notes=? WHERE id=? AND coach_id=?');
-        $stmt->execute([
-            trim($_POST['first_name']),
-            trim($_POST['last_name']),
-            trim($_POST['email']),
-            trim($_POST['sport'] ?? 'Course'),
-            trim($_POST['level'] ?? 'Intermediaire'),
-            trim($_POST['goal'] ?? ''),
-            max(5, min(30, (float)($_POST['vma'] ?? 15))),
-            trim($_POST['notes'] ?? ''),
-            $id,
-            $user['id']
-        ]);
+        db_update('athletes', [
+            'first_name' => trim($_POST['first_name']),
+            'last_name' => trim($_POST['last_name']),
+            'email' => trim($_POST['email']),
+            'sport' => trim($_POST['sport'] ?? 'Course'),
+            'level' => trim($_POST['level'] ?? 'Intermediaire'),
+            'goal' => trim($_POST['goal'] ?? ''),
+            'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
+            'notes' => trim($_POST['notes'] ?? '')
+        ], 'id=? AND coach_id=?', [$id, $user['id']]);
 
         $stmt = db()->prepare('UPDATE users u JOIN athletes a ON a.user_id=u.id SET u.name=?, u.email=? WHERE a.id=?');
         $stmt->execute([
@@ -130,54 +126,50 @@ if ($action) {
             $session = get_session_checked((int)$_POST['id']);
             $attachment = $attachment ?: $session['attachment_url'];
 
-            $stmt = db()->prepare('UPDATE sessions SET date=?, title=?, type=?, status=?, intensity=?, duration_min=?, vma_percent=?, description=?, objective=?, warmup=?, main_workout=?, cooldown=?, coach_notes=?, actual_duration_min=?, feeling=?, pain=?, athlete_feedback=?, attachment_url=?, external_link=? WHERE id=? AND coach_id=?');
-            $stmt->execute([
-                $_POST['date'],
-                $_POST['title'],
-                $_POST['type'],
-                $_POST['status'] ?? 'planned',
-                $_POST['intensity'] ?? 'moderate',
-                $_POST['duration_min'] !== '' ? (int)$_POST['duration_min'] : null,
-                $_POST['vma_percent'] !== '' ? (float)$_POST['vma_percent'] : null,
-                $_POST['description'],
-                '',
-                $_POST['warmup'],
-                $_POST['main_workout'],
-                '',
-                $_POST['coach_notes'],
-                $_POST['actual_duration_min'] !== '' ? (int)$_POST['actual_duration_min'] : null,
-                $_POST['feeling'] !== '' ? (int)$_POST['feeling'] : null,
-                $_POST['pain'] !== '' ? (int)$_POST['pain'] : null,
-                $_POST['athlete_feedback'] ?? '',
-                $attachment,
-                $_POST['external_link'] ?: null,
-                (int)$_POST['id'],
-                $user['id']
-            ]);
+            db_update('sessions', [
+                'date' => $_POST['date'],
+                'title' => $_POST['title'],
+                'type' => $_POST['type'],
+                'status' => $_POST['status'] ?? 'planned',
+                'intensity' => $_POST['intensity'] ?? 'moderate',
+                'duration_min' => nullable_int($_POST['duration_min'] ?? null),
+                'vma_percent' => nullable_float($_POST['vma_percent'] ?? null),
+                'description' => $_POST['description'],
+                'objective' => '',
+                'warmup' => $_POST['warmup'],
+                'main_workout' => $_POST['main_workout'],
+                'cooldown' => '',
+                'coach_notes' => $_POST['coach_notes'],
+                'actual_duration_min' => nullable_int($_POST['actual_duration_min'] ?? null),
+                'feeling' => nullable_int($_POST['feeling'] ?? null),
+                'pain' => nullable_int($_POST['pain'] ?? null),
+                'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
+                'attachment_url' => $attachment,
+                'external_link' => $_POST['external_link'] ?: null
+            ], 'id=? AND coach_id=?', [(int)$_POST['id'], $user['id']]);
         } else {
-            $stmt = db()->prepare('INSERT INTO sessions (athlete_id,coach_id,date,title,type,status,intensity,duration_min,vma_percent,description,objective,warmup,main_workout,cooldown,coach_notes,actual_duration_min,feeling,pain,athlete_feedback,attachment_url,external_link) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-            $stmt->execute([
-                $athleteId,
-                $user['id'],
-                $_POST['date'],
-                $_POST['title'],
-                $_POST['type'],
-                $_POST['status'] ?? 'planned',
-                $_POST['intensity'] ?? 'moderate',
-                $_POST['duration_min'] !== '' ? (int)$_POST['duration_min'] : null,
-                $_POST['vma_percent'] !== '' ? (float)$_POST['vma_percent'] : null,
-                $_POST['description'],
-                '',
-                $_POST['warmup'],
-                $_POST['main_workout'],
-                '',
-                $_POST['coach_notes'],
-                $_POST['actual_duration_min'] !== '' ? (int)$_POST['actual_duration_min'] : null,
-                $_POST['feeling'] !== '' ? (int)$_POST['feeling'] : null,
-                $_POST['pain'] !== '' ? (int)$_POST['pain'] : null,
-                $_POST['athlete_feedback'] ?? '',
-                $attachment,
-                $_POST['external_link'] ?: null
+            db_insert('sessions', [
+                'athlete_id' => $athleteId,
+                'coach_id' => $user['id'],
+                'date' => $_POST['date'],
+                'title' => $_POST['title'],
+                'type' => $_POST['type'],
+                'status' => $_POST['status'] ?? 'planned',
+                'intensity' => $_POST['intensity'] ?? 'moderate',
+                'duration_min' => nullable_int($_POST['duration_min'] ?? null),
+                'vma_percent' => nullable_float($_POST['vma_percent'] ?? null),
+                'description' => $_POST['description'],
+                'objective' => '',
+                'warmup' => $_POST['warmup'],
+                'main_workout' => $_POST['main_workout'],
+                'cooldown' => '',
+                'coach_notes' => $_POST['coach_notes'],
+                'actual_duration_min' => nullable_int($_POST['actual_duration_min'] ?? null),
+                'feeling' => nullable_int($_POST['feeling'] ?? null),
+                'pain' => nullable_int($_POST['pain'] ?? null),
+                'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
+                'attachment_url' => $attachment,
+                'external_link' => $_POST['external_link'] ?: null
             ]);
         }
 
@@ -203,10 +195,35 @@ if ($action) {
         $s = get_session_checked((int)$_POST['id']);
         $date = $_POST['new_date'];
 
-        db()->prepare('INSERT INTO sessions (athlete_id,coach_id,date,title,type,status,intensity,duration_min,vma_percent,description,objective,warmup,main_workout,cooldown,coach_notes,actual_duration_min,feeling,pain,athlete_feedback,attachment_url,external_link) SELECT athlete_id,coach_id,?,title,type,status,intensity,duration_min,vma_percent,description,objective,warmup,main_workout,cooldown,coach_notes,actual_duration_min,feeling,pain,athlete_feedback,attachment_url,external_link FROM sessions WHERE id=?')->execute([
-            $date,
-            $s['id']
-        ]);
+        $columns = array_values(array_filter([
+            'athlete_id',
+            'coach_id',
+            'date',
+            'title',
+            'type',
+            'status',
+            'intensity',
+            'duration_min',
+            'vma_percent',
+            'description',
+            'objective',
+            'warmup',
+            'main_workout',
+            'cooldown',
+            'coach_notes',
+            'actual_duration_min',
+            'feeling',
+            'pain',
+            'athlete_feedback',
+            'attachment_url',
+            'external_link',
+        ], fn($column) => table_has_column('sessions', $column)));
+        $selects = array_map(fn($column) => $column === 'date' ? '?' : $column, $columns);
+
+        db()->prepare(
+            'INSERT INTO sessions (' . implode(',', $columns) . ') SELECT ' .
+            implode(',', $selects) . ' FROM sessions WHERE id=?'
+        )->execute([$date, $s['id']]);
 
         redirect('index.php?page=calendar&athlete_id='.$s['athlete_id'].'&month='.substr($date, 0, 7));
     }
@@ -335,6 +352,7 @@ if ($page === 'home') {
     }
 
     $a = athlete_for_user($u['id']);
+    if (!$a) exit('Aucune fiche athlete rattachee a ce compte.');
     redirect('index.php?page=calendar&athlete_id='.$a['id']);
 }
 
@@ -345,35 +363,76 @@ if ($page === 'dashboard') {
 
     $q = trim($_GET['q'] ?? '');
 
-    $stmt = db()->prepare('SELECT * FROM athletes WHERE coach_id=? AND CONCAT(first_name," ",last_name," ",email) LIKE ? ORDER BY created_at DESC');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.coach_id=? AND CONCAT(a.first_name," ",a.last_name," ",a.email) LIKE ? ORDER BY a.created_at DESC');
     $stmt->execute([$u['id'], '%'.$q.'%']);
     $athletes = $stmt->fetchAll();
 
     [$weekStart, $weekEnd] = week_bounds();
 
-    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND status="planned" AND date >= CURDATE()');
+    $plannedWhere = table_has_column('sessions', 'status') ? 'status="planned" AND date >= CURDATE()' : 'date >= CURDATE()';
+    $doneWhere = table_has_column('sessions', 'status') ? 'status="done"' : 'date < CURDATE()';
+    $weekStatusWhere = table_has_column('sessions', 'status') ? ' AND status <> "cancelled"' : '';
+    $loadExpr = table_has_column('sessions', 'actual_duration_min') || table_has_column('sessions', 'duration_min')
+        ? 'COALESCE(SUM(COALESCE(' .
+            (table_has_column('sessions', 'actual_duration_min') ? 'actual_duration_min' : 'NULL') . ', ' .
+            (table_has_column('sessions', 'duration_min') ? 'duration_min' : 'NULL') . ', 0)), 0)'
+        : '0';
+
+    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND ' . $plannedWhere);
     $stmt->execute([$u['id']]);
     $plannedCount = (int)$stmt->fetchColumn();
 
-    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND status="done"');
+    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND ' . $doneWhere);
     $stmt->execute([$u['id']]);
     $doneCount = (int)$stmt->fetchColumn();
 
-    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND ((feeling IS NOT NULL AND feeling >= 7) OR (pain IS NOT NULL AND pain >= 7))');
-    $stmt->execute([$u['id']]);
-    $alertCount = (int)$stmt->fetchColumn();
+    $alertParts = [];
+    if (table_has_column('sessions', 'feeling')) $alertParts[] = '(feeling IS NOT NULL AND feeling >= 7)';
+    if (table_has_column('sessions', 'pain')) $alertParts[] = '(pain IS NOT NULL AND pain >= 7)';
+    if ($alertParts) {
+        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND (' . implode(' OR ', $alertParts) . ')');
+        $stmt->execute([$u['id']]);
+        $alertCount = (int)$stmt->fetchColumn();
+    } else {
+        $alertCount = 0;
+    }
 
-    $stmt = db()->prepare('SELECT COALESCE(SUM(COALESCE(actual_duration_min, duration_min, 0)), 0) FROM sessions WHERE coach_id=? AND status <> "cancelled" AND date BETWEEN ? AND ?');
+    $stmt = db()->prepare('SELECT ' . $loadExpr . ' FROM sessions WHERE coach_id=?' . $weekStatusWhere . ' AND date BETWEEN ? AND ?');
     $stmt->execute([$u['id'], $weekStart, $weekEnd]);
     $weekLoad = (int)$stmt->fetchColumn();
 
-    $stmt = db()->prepare('SELECT a.*, MAX(CASE WHEN s.status="planned" AND s.date >= CURDATE() THEN s.date END) AS next_date, MAX(CASE WHEN s.status <> "planned" THEN s.date END) AS last_done_date, AVG(s.feeling) AS avg_feeling FROM athletes a LEFT JOIN sessions s ON s.athlete_id=a.id WHERE a.coach_id=? GROUP BY a.id ORDER BY a.first_name, a.last_name');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.coach_id=? ORDER BY a.first_name, a.last_name');
     $stmt->execute([$u['id']]);
     $overview = $stmt->fetchAll();
 
-    $stmt = db()->prepare('SELECT a.*, MAX(s.date) AS last_session_date FROM athletes a LEFT JOIN sessions s ON s.athlete_id=a.id WHERE a.coach_id=? GROUP BY a.id HAVING SUM(CASE WHEN s.status="planned" AND s.date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 1 ELSE 0 END)=0 ORDER BY a.first_name, a.last_name');
-    $stmt->execute([$u['id']]);
-    $reminders = $stmt->fetchAll();
+    foreach ($overview as &$row) {
+        $stmt = db()->prepare('SELECT MIN(date) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . $plannedWhere);
+        $stmt->execute([$row['id'], $u['id']]);
+        $row['next_date'] = $stmt->fetchColumn() ?: null;
+
+        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . $doneWhere);
+        $stmt->execute([$row['id'], $u['id']]);
+        $row['last_done_date'] = $stmt->fetchColumn() ?: null;
+
+        if (table_has_column('sessions', 'feeling')) {
+            $stmt = db()->prepare('SELECT AVG(feeling) FROM sessions WHERE athlete_id=? AND coach_id=?');
+            $stmt->execute([$row['id'], $u['id']]);
+            $row['avg_feeling'] = $stmt->fetchColumn();
+        } else {
+            $row['avg_feeling'] = null;
+        }
+
+        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . (table_has_column('sessions', 'status') ? 'status="planned" AND ' : '') . 'date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)');
+        $stmt->execute([$row['id'], $u['id']]);
+        $row['planned_next_week'] = (int)$stmt->fetchColumn();
+
+        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND coach_id=?');
+        $stmt->execute([$row['id'], $u['id']]);
+        $row['last_session_date'] = $stmt->fetchColumn() ?: null;
+    }
+    unset($row);
+
+    $reminders = array_values(array_filter($overview, fn($row) => (int)$row['planned_next_week'] === 0));
 ?>
 <div class="toolbar">
     <h1>Dashboard coach</h1>
@@ -535,7 +594,7 @@ if ($page === 'edit_athlete') {
 
     if (!can_access_athlete($id)) exit('Accès refusé');
 
-    $stmt = db()->prepare('SELECT * FROM athletes WHERE id=?');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$id]);
     $a = $stmt->fetch();
 
@@ -606,7 +665,7 @@ if ($page === 'coach_calendar') {
 
     $selectedAthleteId = (int)($_GET['athlete_id'] ?? 0);
 
-    $stmt = db()->prepare('SELECT * FROM athletes WHERE coach_id=? ORDER BY first_name, last_name');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.coach_id=? ORDER BY a.first_name, a.last_name');
     $stmt->execute([$u['id']]);
     $athletes = $stmt->fetchAll();
 
@@ -615,7 +674,7 @@ if ($page === 'coach_calendar') {
     }
 
     if ($selectedAthleteId > 0) {
-        $stmt = db()->prepare('SELECT s.*, a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.coach_id=? AND s.athlete_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
+        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.coach_id=? AND s.athlete_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
         $stmt->execute([
             $u['id'],
             $selectedAthleteId,
@@ -623,7 +682,7 @@ if ($page === 'coach_calendar') {
             $end->format('Y-m-d')
         ]);
     } else {
-        $stmt = db()->prepare('SELECT s.*, a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.coach_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
+        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.coach_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
         $stmt->execute([
             $u['id'],
             $start->format('Y-m-d'),
@@ -717,11 +776,11 @@ if ($page === 'calendar') {
     $start = (clone $month)->modify('monday this week');
     $end = (clone $month)->modify('last day of this month')->modify('sunday this week');
 
-    $stmt = db()->prepare('SELECT * FROM athletes WHERE id=?');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$athleteId]);
     $a = $stmt->fetch();
 
-    $stmt = db()->prepare('SELECT * FROM sessions WHERE athlete_id=? AND date BETWEEN ? AND ? ORDER BY date');
+    $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date');
     $stmt->execute([
         $athleteId,
         $start->format('Y-m-d'),

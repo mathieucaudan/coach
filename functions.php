@@ -21,6 +21,116 @@ function require_role(string $role): void { require_login(); if (current_user()[
 function csrf_token(): string { if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(32)); return $_SESSION['csrf']; }
 function verify_csrf(): void { if (($_POST['csrf'] ?? '') !== ($_SESSION['csrf'] ?? '')) { http_response_code(400); exit('Token CSRF invalide'); } }
 
+function table_has_column(string $table, string $column): bool {
+    $knownColumns = [
+        'users' => ['id', 'name', 'email', 'password_hash', 'role', 'created_at'],
+        'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
+        'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
+        'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
+    ];
+    if (in_array($column, $knownColumns[$table] ?? [], true)) return true;
+
+    static $cache = [];
+    $key = $table . '.' . $column;
+    if (array_key_exists($key, $cache)) return $cache[$key];
+
+    try {
+        $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
+        $stmt->execute([$table, $column]);
+        $cache[$key] = (bool)$stmt->fetchColumn();
+    } catch (Throwable $e) {
+        $cache[$key] = false;
+    }
+
+    return $cache[$key];
+}
+
+function sql_optional(string $table, string $alias, string $column, string $fallback): string {
+    return table_has_column($table, $column) ? $alias . '.' . $column : $fallback;
+}
+
+function athlete_select_sql(string $alias = 'a'): string {
+    return implode(', ', [
+        "$alias.id",
+        "$alias.coach_id",
+        "$alias.user_id",
+        "$alias.first_name",
+        "$alias.last_name",
+        "$alias.email",
+        "$alias.created_at",
+        sql_optional('athletes', $alias, 'sport', "'Course'") . ' AS sport',
+        sql_optional('athletes', $alias, 'level', "'Intermediaire'") . ' AS level',
+        sql_optional('athletes', $alias, 'goal', "''") . ' AS goal',
+        sql_optional('athletes', $alias, 'vma', '15') . ' AS vma',
+        sql_optional('athletes', $alias, 'notes', "''") . ' AS notes',
+    ]);
+}
+
+function session_select_sql(string $alias = 's'): string {
+    return implode(', ', [
+        "$alias.id",
+        "$alias.athlete_id",
+        "$alias.coach_id",
+        "$alias.date",
+        "$alias.title",
+        "$alias.type",
+        "$alias.description",
+        "$alias.objective",
+        "$alias.warmup",
+        "$alias.main_workout",
+        "$alias.cooldown",
+        "$alias.coach_notes",
+        "$alias.attachment_url",
+        "$alias.external_link",
+        "$alias.created_at",
+        "$alias.updated_at",
+        sql_optional('sessions', $alias, 'status', "'planned'") . ' AS status',
+        sql_optional('sessions', $alias, 'intensity', "'moderate'") . ' AS intensity',
+        sql_optional('sessions', $alias, 'duration_min', 'NULL') . ' AS duration_min',
+        sql_optional('sessions', $alias, 'vma_percent', 'NULL') . ' AS vma_percent',
+        sql_optional('sessions', $alias, 'actual_duration_min', 'NULL') . ' AS actual_duration_min',
+        sql_optional('sessions', $alias, 'feeling', 'NULL') . ' AS feeling',
+        sql_optional('sessions', $alias, 'pain', 'NULL') . ' AS pain',
+        sql_optional('sessions', $alias, 'athlete_feedback', "''") . ' AS athlete_feedback',
+    ]);
+}
+
+function filter_existing_columns(string $table, array $values): array {
+    return array_filter(
+        $values,
+        fn($column) => table_has_column($table, (string)$column),
+        ARRAY_FILTER_USE_KEY
+    );
+}
+
+function db_insert(string $table, array $values): int {
+    $values = filter_existing_columns($table, $values);
+    if (!$values) return 0;
+
+    $columns = array_keys($values);
+    $placeholders = implode(',', array_fill(0, count($columns), '?'));
+    $sql = 'INSERT INTO ' . $table . ' (' . implode(',', $columns) . ') VALUES (' . $placeholders . ')';
+    db()->prepare($sql)->execute(array_values($values));
+    return (int)db()->lastInsertId();
+}
+
+function db_update(string $table, array $values, string $where, array $whereParams): void {
+    $values = filter_existing_columns($table, $values);
+    if (!$values) return;
+
+    $sets = array_map(fn($column) => $column . '=?', array_keys($values));
+    $sql = 'UPDATE ' . $table . ' SET ' . implode(', ', $sets) . ' WHERE ' . $where;
+    db()->prepare($sql)->execute(array_merge(array_values($values), $whereParams));
+}
+
+function nullable_int($value): ?int {
+    return $value === '' || $value === null ? null : (int)$value;
+}
+
+function nullable_float($value): ?float {
+    return $value === '' || $value === null ? null : (float)$value;
+}
+
 function logout_user(): void {
     $_SESSION = [];
 
@@ -61,7 +171,7 @@ function month_start(?string $month): DateTime {
 }
 
 function athlete_for_user(int $userId): ?array {
-    $stmt = db()->prepare('SELECT * FROM athletes WHERE user_id = ?');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.user_id = ?');
     $stmt->execute([$userId]);
     return $stmt->fetch() ?: null;
 }
@@ -79,7 +189,11 @@ function can_access_athlete(int $athleteId): bool {
 }
 
 function get_session_checked(int $sessionId): array {
-    $stmt = db()->prepare('SELECT s.*, a.first_name, a.last_name, a.vma FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.id=?');
+    $stmt = db()->prepare(
+        'SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name, ' .
+        sql_optional('athletes', 'a', 'vma', '15') . ' AS vma ' .
+        'FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.id=?'
+    );
     $stmt->execute([$sessionId]);
     $session = $stmt->fetch();
     if (!$session || !can_access_athlete((int)$session['athlete_id'])) { http_response_code(404); exit('Séance introuvable'); }
