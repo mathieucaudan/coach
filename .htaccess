@@ -1,6 +1,6 @@
 Options -Indexes
 DirectoryIndex index.php
 
-<FilesMatch "^(config\.php|functions\.php)$">
+<FilesMatch "^(config\.php|config\.example\.php|functions\.php)$">
   Require all denied
 </FilesMatch>
