@@ -14,7 +14,7 @@ function db(): PDO {
 }
 
 function e($value): string { return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8'); }
-function redirect(string $url): never { header('Location: ' . $url); exit; }
+function redirect(string $url): void { header('Location: ' . $url); exit; }
 function current_user(): ?array { return $_SESSION['user'] ?? null; }
 function require_login(): void { if (!current_user()) redirect('index.php?page=login'); }
 function require_role(string $role): void { require_login(); if (current_user()['role'] !== $role) { http_response_code(403); exit('Accès refusé'); } }
@@ -98,7 +98,7 @@ function session_select_sql(string $alias = 's'): string {
 function filter_existing_columns(string $table, array $values): array {
     return array_filter(
         $values,
-        fn($column) => table_has_column($table, (string)$column),
+        function ($column) use ($table) { return table_has_column($table, (string)$column); },
         ARRAY_FILTER_USE_KEY
     );
 }
@@ -118,7 +118,7 @@ function db_update(string $table, array $values, string $where, array $wherePara
     $values = filter_existing_columns($table, $values);
     if (!$values) return;
 
-    $sets = array_map(fn($column) => $column . '=?', array_keys($values));
+    $sets = array_map(function ($column) { return $column . '=?'; }, array_keys($values));
     $sql = 'UPDATE ' . $table . ' SET ' . implode(', ', $sets) . ' WHERE ' . $where;
     db()->prepare($sql)->execute(array_merge(array_values($values), $whereParams));
 }

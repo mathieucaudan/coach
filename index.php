@@ -217,8 +217,8 @@ if ($action) {
             'athlete_feedback',
             'attachment_url',
             'external_link',
-        ], fn($column) => table_has_column('sessions', $column)));
-        $selects = array_map(fn($column) => $column === 'date' ? '?' : $column, $columns);
+        ], function ($column) { return table_has_column('sessions', $column); }));
+        $selects = array_map(function ($column) { return $column === 'date' ? '?' : $column; }, $columns);
 
         db()->prepare(
             'INSERT INTO sessions (' . implode(',', $columns) . ') SELECT ' .
@@ -432,7 +432,7 @@ if ($page === 'dashboard') {
     }
     unset($row);
 
-    $reminders = array_values(array_filter($overview, fn($row) => (int)$row['planned_next_week'] === 0));
+    $reminders = array_values(array_filter($overview, function ($row) { return (int)$row['planned_next_week'] === 0; }));
 ?>
 <div class="toolbar">
     <h1>Dashboard coach</h1>
