@@ -1,5 +1,28 @@
 <?php
+$debugEnabled = isset($_GET['debug']) && $_GET['debug'] === '1';
+if ($debugEnabled) {
+    ini_set('display_errors', '1');
+    ini_set('display_startup_errors', '1');
+    error_reporting(E_ALL);
+}
+
+if (!file_exists(__DIR__ . '/config.php')) {
+    http_response_code(500);
+    exit($debugEnabled ? 'config.php manquant dans public_html.' : 'Configuration manquante.');
+}
+
 require_once __DIR__ . '/config.php';
+
+if (!defined('APP_NAME')) {
+    define('APP_NAME', 'Coach Training Planner');
+}
+
+foreach (['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS'] as $requiredConfigConstant) {
+    if (!defined($requiredConfigConstant)) {
+        http_response_code(500);
+        exit($debugEnabled ? 'Constante manquante dans config.php : ' . $requiredConfigConstant : 'Configuration incomplete.');
+    }
+}
 
 function db(): PDO {
     static $pdo = null;
@@ -14,12 +37,12 @@ function db(): PDO {
 }
 
 function e($value): string { return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8'); }
-function redirect(string $url): void { header('Location: ' . $url); exit; }
-function current_user(): ?array { return $_SESSION['user'] ?? null; }
-function require_login(): void { if (!current_user()) redirect('index.php?page=login'); }
-function require_role(string $role): void { require_login(); if (current_user()['role'] !== $role) { http_response_code(403); exit('Accès refusé'); } }
+function redirect(string $url) { header('Location: ' . $url); exit; }
+function current_user() { return $_SESSION['user'] ?? null; }
+function require_login() { if (!current_user()) redirect('index.php?page=login'); }
+function require_role(string $role) { require_login(); if (current_user()['role'] !== $role) { http_response_code(403); exit('Accès refusé'); } }
 function csrf_token(): string { if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(32)); return $_SESSION['csrf']; }
-function verify_csrf(): void { if (($_POST['csrf'] ?? '') !== ($_SESSION['csrf'] ?? '')) { http_response_code(400); exit('Token CSRF invalide'); } }
+function verify_csrf() { if (($_POST['csrf'] ?? '') !== ($_SESSION['csrf'] ?? '')) { http_response_code(400); exit('Token CSRF invalide'); } }
 
 function table_has_column(string $table, string $column): bool {
     $knownColumns = [
@@ -114,7 +137,7 @@ function db_insert(string $table, array $values): int {
     return (int)db()->lastInsertId();
 }
 
-function db_update(string $table, array $values, string $where, array $whereParams): void {
+function db_update(string $table, array $values, string $where, array $whereParams) {
     $values = filter_existing_columns($table, $values);
     if (!$values) return;
 
@@ -123,15 +146,15 @@ function db_update(string $table, array $values, string $where, array $wherePara
     db()->prepare($sql)->execute(array_merge(array_values($values), $whereParams));
 }
 
-function nullable_int($value): ?int {
+function nullable_int($value) {
     return $value === '' || $value === null ? null : (int)$value;
 }
 
-function nullable_float($value): ?float {
+function nullable_float($value) {
     return $value === '' || $value === null ? null : (float)$value;
 }
 
-function logout_user(): void {
+function logout_user() {
     $_SESSION = [];
 
     if (ini_get('session.use_cookies')) {
@@ -165,12 +188,12 @@ function session_types(): array
 }
 function type_class(string $type): string { return 'type-' . str_replace([' ', 'é'], ['-', 'e'], $type); }
 
-function month_start(?string $month): DateTime {
+function month_start($month): DateTime {
     if ($month && preg_match('/^\d{4}-\d{2}$/', $month)) return new DateTime($month . '-01');
     return new DateTime(date('Y-m-01'));
 }
 
-function athlete_for_user(int $userId): ?array {
+function athlete_for_user(int $userId) {
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.user_id = ?');
     $stmt->execute([$userId]);
     return $stmt->fetch() ?: null;
@@ -200,7 +223,7 @@ function get_session_checked(int $sessionId): array {
     return $session;
 }
 
-function upload_attachment(): ?string {
+function upload_attachment() {
     if (empty($_FILES['attachment']['name'])) return null;
     if ($_FILES['attachment']['error'] !== UPLOAD_ERR_OK) return null;
     $allowed = ['pdf','jpg','jpeg','png','webp','doc','docx'];
@@ -230,28 +253,28 @@ function intensities(): array {
     ];
 }
 
-function status_label(?string $status): string {
+function status_label($status): string {
     $statuses = session_statuses();
     return $statuses[$status ?: 'planned'] ?? $statuses['planned'];
 }
 
-function intensity_label(?string $intensity): string {
+function intensity_label($intensity): string {
     $intensities = intensities();
     return $intensities[$intensity ?: 'moderate'] ?? $intensities['moderate'];
 }
 
-function pace_from_vma(float $vma, float $percent): ?float {
+function pace_from_vma(float $vma, float $percent) {
     if ($vma <= 0 || $percent <= 0) return null;
     return 60 / ($vma * $percent / 100);
 }
 
-function format_pace(?float $minutesPerKm): string {
+function format_pace($minutesPerKm): string {
     if (!$minutesPerKm || $minutesPerKm <= 0) return '-';
     $seconds = (int)round($minutesPerKm * 60);
     return floor($seconds / 60) . "'" . str_pad((string)($seconds % 60), 2, '0', STR_PAD_LEFT) . '/km';
 }
 
-function format_split(?float $minutesPerKm, float $distanceKm): string {
+function format_split($minutesPerKm, float $distanceKm): string {
     if (!$minutesPerKm || $minutesPerKm <= 0) return '-';
     $seconds = (int)round($minutesPerKm * $distanceKm * 60);
     if ($seconds < 60) return $seconds . 's';

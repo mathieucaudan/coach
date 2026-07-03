@@ -1,4 +1,20 @@
 <?php
+$debugEnabled = isset($_GET['debug']) && $_GET['debug'] === '1';
+if ($debugEnabled) {
+    ini_set('display_errors', '1');
+    ini_set('display_startup_errors', '1');
+    error_reporting(E_ALL);
+    register_shutdown_function(function () {
+        $error = error_get_last();
+        if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            http_response_code(500);
+            echo '<pre style="white-space:pre-wrap;background:#111;color:#f7f7f7;padding:16px">';
+            echo htmlspecialchars($error['message'] . "\n" . $error['file'] . ':' . $error['line'], ENT_QUOTES, 'UTF-8');
+            echo '</pre>';
+        }
+    });
+}
+
 session_start();
 require_once __DIR__ . '/functions.php';
 
@@ -259,7 +275,7 @@ if ($action) {
     exit('Erreur : ' . e($e->getMessage()));
 }
 
-function header_html(string $title): void {
+function header_html(string $title) {
     $u = current_user();
 ?>
 <!doctype html>
@@ -298,7 +314,7 @@ function header_html(string $title): void {
 <?php
 }
 
-function footer_html(): void {
+function footer_html() {
     echo '</main></body></html>';
 }
 
