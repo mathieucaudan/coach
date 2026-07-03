@@ -286,3 +286,27 @@ function week_bounds(): array {
     $end = (clone $start)->modify('+6 days');
     return [$start->format('Y-m-d'), $end->format('Y-m-d')];
 }
+
+function format_short_date($date): string {
+    if (!$date) return '-';
+    return (new DateTime($date))->format('d/m');
+}
+
+function format_full_date($date): string {
+    if (!$date) return '-';
+    return (new DateTime($date))->format('d/m/Y');
+}
+
+function relative_day_label($date): string {
+    if (!$date) return '-';
+
+    $today = new DateTime(date('Y-m-d'));
+    $target = new DateTime($date);
+    $diff = (int)$today->diff($target)->format('%r%a');
+
+    if ($diff === 0) return "Aujourd'hui";
+    if ($diff === 1) return 'Demain';
+    if ($diff === -1) return 'Hier';
+    if ($diff > 1) return 'Dans ' . $diff . ' jours';
+    return 'Il y a ' . abs($diff) . ' jours';
+}

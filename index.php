@@ -422,9 +422,10 @@ if ($page === 'dashboard') {
     $overview = $stmt->fetchAll();
 
     foreach ($overview as &$row) {
-        $stmt = db()->prepare('SELECT MIN(date) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . $plannedWhere);
+        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND s.coach_id=? AND ' . $plannedWhere . ' ORDER BY s.date LIMIT 1');
         $stmt->execute([$row['id'], $u['id']]);
-        $row['next_date'] = $stmt->fetchColumn() ?: null;
+        $row['next_session'] = $stmt->fetch() ?: null;
+        $row['next_date'] = $row['next_session']['date'] ?? null;
 
         $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . $doneWhere);
         $stmt->execute([$row['id'], $u['id']]);
@@ -449,6 +450,7 @@ if ($page === 'dashboard') {
     unset($row);
 
     $reminders = array_values(array_filter($overview, function ($row) { return (int)$row['planned_next_week'] === 0; }));
+    $attentionRows = array_slice($reminders, 0, 4);
 ?>
 <div class="toolbar">
     <h1>Dashboard coach</h1>
@@ -472,6 +474,18 @@ if ($page === 'dashboard') {
     <section class="stat-card danger"><strong><?=$alertCount?></strong><span>Alertes fatigue</span></section>
 </div>
 
+<section class="focus-strip">
+    <div>
+        <span class="eyebrow">Priorite coach</span>
+        <strong><?=count($reminders)?> athlete<?=count($reminders) > 1 ? 's' : ''?> sans seance cette semaine</strong>
+        <p>Commence par les athletes sans prochaine seance planifiee.</p>
+    </div>
+    <div class="actions">
+        <a class="btn secondary" href="#rappels">Voir les rappels</a>
+        <a class="btn secondary" href="index.php?page=coach_calendar">Ouvrir le calendrier</a>
+    </div>
+</section>
+
 <section class="card">
     <h2>Vision globale</h2>
     <div class="overview-list">
@@ -482,31 +496,39 @@ if ($page === 'dashboard') {
                     <p><?=e($row['sport'])?> · <?=e($row['level'])?> · VMA <?=e($row['vma'])?> km/h</p>
                 </div>
                 <div>
-                    <span>Prochaine: <?=e($row['next_date'] ?: 'Aucune')?></span>
+                    <span>Prochaine: <?=e($row['next_date'] ? relative_day_label($row['next_date']).' - '.format_short_date($row['next_date']) : 'Aucune')?></span>
+                    <span><?=e($row['next_session']['title'] ?? 'Aucune seance programmee')?></span>
                     <span>Ressenti moy.: <?=e($row['avg_feeling'] ? round((float)$row['avg_feeling'], 1).'/10' : '-')?></span>
+                </div>
+                <div class="row-actions">
+                    <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$row['id']?>">Calendrier</a>
+                    <a class="btn small" href="index.php?page=edit_session&athlete_id=<?=$row['id']?>&date=<?=date('Y-m-d')?>">Seance</a>
                 </div>
             </article>
         <?php endforeach; ?>
     </div>
 </section>
 
-<section class="card">
+<section class="card" id="rappels">
     <h2>Rappels manque de seance</h2>
     <?php if(!$reminders): ?>
         <p class="muted-text">Aucun rappel pour le moment.</p>
     <?php endif; ?>
     <div class="overview-list">
-        <?php foreach($reminders as $row): ?>
+        <?php foreach($attentionRows as $row): ?>
             <article class="overview-row warning-row">
-                <strong><?=e($row['first_name'].' '.$row['last_name'])?></strong>
-                <span>Derniere seance: <?=e($row['last_session_date'] ?: 'aucune')?></span>
+                <div>
+                    <strong><?=e($row['first_name'].' '.$row['last_name'])?></strong>
+                    <span>Derniere seance: <?=e($row['last_session_date'] ? relative_day_label($row['last_session_date']).' - '.format_short_date($row['last_session_date']) : 'aucune')?></span>
+                </div>
+                <a class="btn small" href="index.php?page=edit_session&athlete_id=<?=$row['id']?>&date=<?=date('Y-m-d')?>">Planifier</a>
             </article>
         <?php endforeach; ?>
     </div>
 </section>
 
 <div class="grid">
-    <section class="card">
+    <section class="card" id="add-athlete">
         <h2>Ajouter un athlète</h2>
 
         <form method="post">
@@ -804,9 +826,30 @@ if ($page === 'calendar') {
     ]);
 
     $sessions = [];
+    $monthSessions = [];
+    $nextSession = null;
+    $lastSession = null;
+    $weekSessionCount = 0;
+    $displayLoad = 0;
+    [$currentWeekStart, $currentWeekEnd] = week_bounds();
 
     foreach ($stmt->fetchAll() as $s) {
         $sessions[$s['date']][] = $s;
+        $monthSessions[] = $s;
+
+        if ($s['date'] >= date('Y-m-d') && (!$nextSession || $s['date'] < $nextSession['date'])) {
+            $nextSession = $s;
+        }
+
+        if ($s['date'] < date('Y-m-d') && (!$lastSession || $s['date'] > $lastSession['date'])) {
+            $lastSession = $s;
+        }
+
+        if ($s['date'] >= $currentWeekStart && $s['date'] <= $currentWeekEnd) {
+            $weekSessionCount++;
+        }
+
+        $displayLoad += (int)($s['actual_duration_min'] ?: ($s['duration_min'] ?: 0));
     }
 
     header_html('Calendrier');
@@ -829,6 +872,25 @@ if ($page === 'calendar') {
         <?php endif; ?>
     </div>
 </div>
+
+<section class="athlete-next">
+    <div class="next-session-panel">
+        <span class="eyebrow">Prochaine seance</span>
+        <?php if($nextSession): ?>
+            <strong><?=e($nextSession['title'])?></strong>
+            <p><?=e(relative_day_label($nextSession['date']))?> - <?=e(format_full_date($nextSession['date']))?> - <?=e($nextSession['type'])?></p>
+            <a class="btn secondary small" href="index.php?page=session&id=<?=$nextSession['id']?>">Voir le detail</a>
+        <?php else: ?>
+            <strong>Aucune seance programmee</strong>
+            <p>Le planning est vide pour les prochains jours affiches.</p>
+        <?php endif; ?>
+    </div>
+    <div class="mini-metrics">
+        <div><strong><?=$weekSessionCount?></strong><span>Cette semaine</span></div>
+        <div><strong><?=$displayLoad?> min</strong><span>Charge affichee</span></div>
+        <div><strong><?=e($lastSession ? format_short_date($lastSession['date']) : '-')?></strong><span>Derniere</span></div>
+    </div>
+</section>
 
 <section class="card athlete-summary">
     <h2>Profil athlete</h2>
@@ -887,6 +949,23 @@ if ($page === 'calendar') {
     endwhile;
     ?>
 </div>
+<section class="card month-agenda">
+    <h2>Seances de la periode</h2>
+    <?php if(!$monthSessions): ?>
+        <p class="muted-text">Aucune seance sur cette periode.</p>
+    <?php endif; ?>
+    <div class="agenda-list">
+        <?php foreach($monthSessions as $s): ?>
+            <a class="agenda-row" href="index.php?page=session&id=<?=$s['id']?>">
+                <div>
+                    <strong><?=e($s['title'])?></strong>
+                    <span><?=e(format_full_date($s['date']))?> - <?=e($s['type'])?></span>
+                </div>
+                <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
+            </a>
+        <?php endforeach; ?>
+    </div>
+</section>
 <?php
     footer_html();
     exit;

@@ -192,6 +192,69 @@ body{
     background:#fef2f2
 }
 
+.focus-strip,
+.athlete-next{
+    display:flex;
+    justify-content:space-between;
+    gap:16px;
+    align-items:center;
+    background:#0f172a;
+    color:#fff;
+    border-radius:16px;
+    padding:18px;
+    margin-bottom:16px
+}
+
+.focus-strip p,
+.athlete-next p{
+    margin:4px 0 0;
+    color:#cbd5e1
+}
+
+.focus-strip strong,
+.athlete-next strong{
+    display:block;
+    font-size:20px
+}
+
+.eyebrow{
+    display:block;
+    color:#93c5fd;
+    font-size:12px;
+    font-weight:900;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    margin-bottom:4px
+}
+
+.next-session-panel{
+    min-width:260px
+}
+
+.mini-metrics{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(110px,1fr));
+    gap:10px
+}
+
+.mini-metrics div{
+    background:#ffffff14;
+    border:1px solid #ffffff24;
+    border-radius:12px;
+    padding:12px
+}
+
+.mini-metrics strong,
+.mini-metrics span{
+    display:block
+}
+
+.mini-metrics span{
+    color:#cbd5e1;
+    font-size:12px;
+    margin-top:3px
+}
+
 .overview-list{
     display:grid;
     gap:10px
@@ -200,6 +263,7 @@ body{
 .overview-row{
     display:flex;
     justify-content:space-between;
+    align-items:center;
     gap:12px;
     border:1px solid #e5e7eb;
     border-radius:14px;
@@ -216,6 +280,17 @@ body{
     display:block;
     color:#334155;
     font-size:13px
+}
+
+.overview-row>div:first-child{
+    min-width:190px
+}
+
+.row-actions{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+    justify-content:flex-end
 }
 
 .muted-text{
@@ -499,6 +574,39 @@ body{
     padding:12px
 }
 
+.month-agenda{
+    margin-top:16px
+}
+
+.agenda-list{
+    display:grid;
+    gap:10px
+}
+
+.agenda-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    text-decoration:none;
+    color:#142033;
+    background:#f8fafc;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    padding:12px
+}
+
+.agenda-row strong,
+.agenda-row span{
+    display:block
+}
+
+.agenda-row span{
+    color:#64748b;
+    font-size:13px;
+    margin-top:3px
+}
+
 .mobile-only{
     display:none
 }
@@ -577,6 +685,31 @@ body{
     }
 
     .overview-row{
+        flex-direction:column
+    }
+
+    .focus-strip,
+    .athlete-next{
+        align-items:flex-start;
+        flex-direction:column
+    }
+
+    .mini-metrics{
+        width:100%;
+        grid-template-columns:1fr
+    }
+
+    .row-actions,
+    .agenda-row{
+        width:100%
+    }
+
+    .row-actions{
+        justify-content:flex-start
+    }
+
+    .agenda-row{
+        align-items:flex-start;
         flex-direction:column
     }
 
