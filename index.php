@@ -1023,14 +1023,13 @@ if ($page === 'coach_calendar') {
             <div class="day-num"><?=$d->format('d/m')?></div>
 
             <?php if($selectedAthleteId > 0 && !$daySessions): ?>
-                <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>">
-                    <span>Ajouter séance</span>
+                <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>" title="Ajouter une séance">
+                    <span aria-hidden="true">+</span>
                 </a>
             <?php endif; ?>
 
             <?php if($dailyDebrief): ?>
-                <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>">
-                    <span>Retour libre</span>
+                <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Consulter le retour du <?=e(format_full_date($date))?>" title="Retour enregistré">
                     <span class="debrief-dot debrief-debriefed" aria-label="Retour enregistré"></span>
                 </a>
             <?php endif; ?>
@@ -1192,12 +1191,12 @@ if ($page === 'calendar') {
 
             <?php if(!$daySessions && !$dailyDebrief): ?>
                 <?php if($u['role'] === 'coach'): ?>
-                    <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>">
-                        <span>Ajouter séance</span>
+                    <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>" title="Ajouter une séance">
+                        <span aria-hidden="true">+</span>
                     </a>
                 <?php elseif($u['role'] === 'athlete'): ?>
-                    <a class="empty-day-action" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter un retour le <?=e(format_full_date($date))?>">
-                        <span>Retour libre</span>
+                    <a class="empty-day-action" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter un retour le <?=e(format_full_date($date))?>" title="Ajouter un retour">
+                        <span aria-hidden="true">+</span>
                     </a>
                 <?php endif; ?>
             <?php elseif($u['role'] === 'coach'): ?>
@@ -1205,8 +1204,7 @@ if ($page === 'calendar') {
             <?php endif; ?>
 
             <?php if($dailyDebrief): ?>
-                <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>">
-                    <span>Retour libre</span>
+                <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Consulter le retour du <?=e(format_full_date($date))?>" title="Retour enregistré">
                     <span class="debrief-dot debrief-debriefed" aria-label="Retour enregistré"></span>
                 </a>
             <?php endif; ?>
