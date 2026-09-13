@@ -39,14 +39,22 @@ function db(): PDO {
 function e($value): string { return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8'); }
 function redirect(string $url) { header('Location: ' . $url); exit; }
 function current_user() { return $_SESSION['user'] ?? null; }
+function is_super_admin(): bool { return (current_user()['role'] ?? null) === 'super_admin'; }
 function require_login() { if (!current_user()) redirect('index.php?page=login'); }
-function require_role(string $role) { require_login(); if (current_user()['role'] !== $role) { http_response_code(403); exit('Accès refusé'); } }
+function require_role(string $role) {
+    require_login();
+    $currentRole = current_user()['role'];
+    if ($currentRole === $role || ($role === 'coach' && $currentRole === 'super_admin')) return;
+    http_response_code(403);
+    exit('Accès refusé');
+}
 function csrf_token(): string { if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(32)); return $_SESSION['csrf']; }
 function verify_csrf() { if (($_POST['csrf'] ?? '') !== ($_SESSION['csrf'] ?? '')) { http_response_code(400); exit('Token CSRF invalide'); } }
 
 function table_has_column(string $table, string $column): bool {
     $knownColumns = [
         'users' => ['id', 'name', 'email', 'password_hash', 'role', 'created_at'],
+        'auth_tokens' => ['id', 'user_id', 'selector', 'validator_hash', 'expires_at', 'created_at'],
         'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
         'athlete_coaches' => ['athlete_id', 'coach_id', 'created_at'],
         'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
@@ -84,6 +92,23 @@ function table_exists(string $table): bool {
     }
 
     return $cache[$table];
+}
+
+function user_role_needs_migration(): bool {
+    try {
+        $stmt = db()->prepare('SELECT DATA_TYPE, COLUMN_TYPE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = "users" AND COLUMN_NAME = "role" LIMIT 1');
+        $stmt->execute();
+        $column = $stmt->fetch();
+        if (!$column) return false;
+
+        if ($column['DATA_TYPE'] === 'enum') {
+            return strpos((string)$column['COLUMN_TYPE'], 'super_admin') === false;
+        }
+
+        return $column['DATA_TYPE'] !== 'varchar' || (int)$column['CHARACTER_MAXIMUM_LENGTH'] < 32;
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function sql_optional(string $table, string $alias, string $column, string $fallback): string {
@@ -162,6 +187,76 @@ function db_update(string $table, array $values, string $where, array $wherePara
     $sets = array_map(function ($column) { return $column . '=?'; }, array_keys($values));
     $sql = 'UPDATE ' . $table . ' SET ' . implode(', ', $sets) . ' WHERE ' . $where;
     db()->prepare($sql)->execute(array_merge(array_values($values), $whereParams));
+}
+
+function login_user(array $user): void {
+    $_SESSION['user'] = [
+        'id' => (int)$user['id'],
+        'name' => $user['name'],
+        'email' => $user['email'],
+        'role' => $user['role']
+    ];
+}
+
+function remember_cookie_options(int $expires): array {
+    return [
+        'expires' => $expires,
+        'path' => '/',
+        'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ];
+}
+
+function remember_user(int $userId): void {
+    if (!table_exists('auth_tokens')) return;
+
+    $selector = bin2hex(random_bytes(9));
+    $validator = bin2hex(random_bytes(32));
+    $expires = time() + 60 * 60 * 24 * 30;
+
+    db()->prepare('INSERT INTO auth_tokens (user_id, selector, validator_hash, expires_at, created_at) VALUES (?,?,?,?,NOW())')
+        ->execute([$userId, $selector, hash('sha256', $validator), date('Y-m-d H:i:s', $expires)]);
+
+    setcookie('remember_login', $selector . ':' . $validator, remember_cookie_options($expires));
+}
+
+function clear_remember_token(): void {
+    if (!empty($_COOKIE['remember_login']) && table_exists('auth_tokens')) {
+        [$selector] = array_pad(explode(':', $_COOKIE['remember_login'], 2), 2, null);
+        if ($selector) {
+            db()->prepare('DELETE FROM auth_tokens WHERE selector=?')->execute([$selector]);
+        }
+    }
+
+    setcookie('remember_login', '', remember_cookie_options(time() - 3600));
+}
+
+function restore_remembered_login(): void {
+    if (current_user() || empty($_COOKIE['remember_login']) || !table_exists('auth_tokens')) return;
+
+    [$selector, $validator] = array_pad(explode(':', $_COOKIE['remember_login'], 2), 2, null);
+    if (!$selector || !$validator) {
+        clear_remember_token();
+        return;
+    }
+
+    $stmt = db()->prepare(
+        'SELECT t.*, u.name, u.email, u.role
+         FROM auth_tokens t
+         JOIN users u ON u.id=t.user_id
+         WHERE t.selector=? AND t.expires_at > NOW()
+         LIMIT 1'
+    );
+    $stmt->execute([$selector]);
+    $token = $stmt->fetch();
+
+    if (!$token || !hash_equals((string)$token['validator_hash'], hash('sha256', $validator))) {
+        clear_remember_token();
+        return;
+    }
+
+    login_user($token);
 }
 
 function nullable_int($value) {
@@ -440,6 +535,40 @@ function create_quick_session(int $athleteId, string $date, string $title, strin
 function run_pending_migrations(): array {
     $applied = [];
 
+    if (user_role_needs_migration()) {
+        try {
+            db()->exec("ALTER TABLE users MODIFY role VARCHAR(32) NOT NULL DEFAULT 'athlete'");
+            $applied[] = 'users_role';
+        } catch (Throwable $e) {
+            // Some hosts restrict ALTER; existing VARCHAR schemas can continue without this step.
+        }
+    }
+
+    if (!table_exists('auth_tokens')) {
+        db()->exec(
+            'CREATE TABLE auth_tokens (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                user_id INT NOT NULL,
+                selector VARCHAR(32) NOT NULL,
+                validator_hash CHAR(64) NOT NULL,
+                expires_at DATETIME NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_auth_tokens_selector (selector),
+                KEY idx_auth_tokens_user (user_id),
+                KEY idx_auth_tokens_expires (expires_at),
+                CONSTRAINT fk_auth_tokens_user
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        $applied[] = 'auth_tokens';
+    }
+
+    if (ensure_configured_super_admin()) {
+        $applied[] = 'super_admin_config';
+    }
+
     if (!table_exists('athlete_coaches')) {
         db()->exec(
             'CREATE TABLE athlete_coaches (
@@ -515,6 +644,7 @@ function run_pending_migrations(): array {
 }
 
 function logout_user() {
+    clear_remember_token();
     $_SESSION = [];
 
     if (ini_get('session.use_cookies')) {
@@ -564,6 +694,7 @@ function athlete_coaches_ready(): bool {
 }
 
 function coach_athlete_where(string $alias = 'a'): string {
+    if (is_super_admin()) return '1=1';
     if (!athlete_coaches_ready()) return $alias . '.coach_id = ?';
 
     return '(' . $alias . '.coach_id = ? OR EXISTS (
@@ -573,6 +704,7 @@ function coach_athlete_where(string $alias = 'a'): string {
 }
 
 function coach_athlete_params(int $coachId): array {
+    if (is_super_admin()) return [];
     return athlete_coaches_ready() ? [$coachId, $coachId] : [$coachId];
 }
 
@@ -625,9 +757,63 @@ function sync_athlete_coaches(int $athleteId, int $primaryCoachId, ?int $seconda
     }
 }
 
+function ensure_configured_super_admin(): bool {
+    if (!defined('SUPER_ADMIN_EMAIL') || !defined('SUPER_ADMIN_PASSWORD')) return false;
+
+    $email = trim((string)SUPER_ADMIN_EMAIL);
+    $password = (string)SUPER_ADMIN_PASSWORD;
+    $name = defined('SUPER_ADMIN_NAME') ? trim((string)SUPER_ADMIN_NAME) : 'Super Admin';
+
+    if ($email === '' || $password === '') return false;
+
+    $stmt = db()->prepare('SELECT id, name, password_hash, role FROM users WHERE email=? LIMIT 1');
+    $stmt->execute([$email]);
+    $existing = $stmt->fetch();
+
+    if ($existing) {
+        if (
+            $existing['name'] === ($name ?: 'Super Admin')
+            && $existing['role'] === 'super_admin'
+            && password_verify($password, (string)$existing['password_hash'])
+        ) {
+            return false;
+        }
+
+        db_update('users', [
+            'name' => $name ?: 'Super Admin',
+            'password_hash' => password_hash($password, PASSWORD_BCRYPT),
+            'role' => 'super_admin',
+        ], 'id=?', [(int)$existing['id']]);
+    } else {
+        db_insert('users', [
+            'name' => $name ?: 'Super Admin',
+            'email' => $email,
+            'password_hash' => password_hash($password, PASSWORD_BCRYPT),
+            'role' => 'super_admin',
+        ]);
+    }
+
+    return true;
+}
+
+function bootstrap_configured_super_admin(): void {
+    if (!defined('SUPER_ADMIN_EMAIL') || !defined('SUPER_ADMIN_PASSWORD')) return;
+
+    try {
+        if (user_role_needs_migration()) {
+            db()->exec("ALTER TABLE users MODIFY role VARCHAR(32) NOT NULL DEFAULT 'athlete'");
+        }
+        ensure_configured_super_admin();
+    } catch (Throwable $e) {
+        // The normal login flow should still render even if bootstrap is unavailable.
+    }
+}
+
 function can_access_athlete(int $athleteId): bool {
+    if ($athleteId <= 0) return false;
     $user = current_user();
     if (!$user) return false;
+    if ($user['role'] === 'super_admin') return true;
     if ($user['role'] === 'coach') {
         $stmt = db()->prepare('SELECT a.id FROM athletes a WHERE a.id = ? AND ' . coach_athlete_where('a'));
         $stmt->execute(array_merge([$athleteId], coach_athlete_params((int)$user['id'])));

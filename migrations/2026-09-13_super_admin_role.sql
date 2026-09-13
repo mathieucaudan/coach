@@ -1,0 +1,1 @@
+ALTER TABLE users MODIFY role VARCHAR(32) NOT NULL DEFAULT 'athlete';

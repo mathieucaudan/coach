@@ -17,6 +17,8 @@ if ($debugEnabled) {
 
 session_start();
 require_once __DIR__ . '/functions.php';
+bootstrap_configured_super_admin();
+restore_remembered_login();
 
 $page = $_GET['page'] ?? 'home';
 $action = $_POST['action'] ?? null;
@@ -37,12 +39,10 @@ if ($action) {
         $u = $stmt->fetch();
 
         if ($u && password_verify($_POST['password'] ?? '', $u['password_hash'])) {
-            $_SESSION['user'] = [
-                'id' => (int)$u['id'],
-                'name' => $u['name'],
-                'email' => $u['email'],
-                'role' => $u['role']
-            ];
+            login_user($u);
+            if (!empty($_POST['remember'])) {
+                remember_user((int)$u['id']);
+            }
             redirect('index.php');
         }
 
@@ -57,8 +57,36 @@ if ($action) {
 
     require_login();
 
+    if ($action === 'create_coach') {
+        require_role('super_admin');
+
+        $name = trim($_POST['name'] ?? '');
+        $email = trim($_POST['email'] ?? '');
+        $password = $_POST['password'] ?: 'password123';
+
+        if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException('Nom ou email invalide.');
+        }
+
+        $stmt = db()->prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,"coach")');
+        $stmt->execute([$name, $email, password_hash($password, PASSWORD_BCRYPT)]);
+        $_SESSION['success'] = 'Coach créé.';
+
+        redirect('index.php?page=admin');
+    }
+
     if ($action === 'create_athlete') {
         require_role('coach');
+
+        $primaryCoachId = (int)$user['id'];
+        if ($user['role'] === 'super_admin') {
+            $primaryCoachId = nullable_int($_POST['primary_coach_id'] ?? null) ?? 0;
+            $stmt = db()->prepare('SELECT id FROM users WHERE id=? AND role="coach"');
+            $stmt->execute([$primaryCoachId]);
+            if (!$stmt->fetch()) {
+                throw new InvalidArgumentException('Coach principal invalide.');
+            }
+        }
 
         $hash = password_hash($_POST['password'] ?: 'password123', PASSWORD_BCRYPT);
         $name = trim($_POST['first_name'].' '.$_POST['last_name']);
@@ -71,7 +99,7 @@ if ($action) {
         $userId = (int)db()->lastInsertId();
 
         $athleteId = db_insert('athletes', [
-            'coach_id' => $user['id'],
+            'coach_id' => $primaryCoachId,
             'user_id' => $userId,
             'first_name' => trim($_POST['first_name']),
             'last_name' => trim($_POST['last_name']),
@@ -82,7 +110,7 @@ if ($action) {
             'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
             'notes' => trim($_POST['notes'] ?? '')
         ]);
-        sync_athlete_coaches($athleteId, (int)$user['id'], nullable_int($_POST['secondary_coach_id'] ?? null));
+        sync_athlete_coaches($athleteId, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
 
         db()->commit();
 
@@ -99,8 +127,18 @@ if ($action) {
         $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
         $stmt->execute([$id]);
         $athleteToUpdate = $stmt->fetch();
+        $primaryCoachId = (int)$athleteToUpdate['coach_id'];
+        if ($user['role'] === 'super_admin') {
+            $primaryCoachId = nullable_int($_POST['primary_coach_id'] ?? null) ?? 0;
+            $stmt = db()->prepare('SELECT id FROM users WHERE id=? AND role="coach"');
+            $stmt->execute([$primaryCoachId]);
+            if (!$stmt->fetch()) {
+                throw new InvalidArgumentException('Coach principal invalide.');
+            }
+        }
 
         db_update('athletes', [
+            'coach_id' => $primaryCoachId,
             'first_name' => trim($_POST['first_name']),
             'last_name' => trim($_POST['last_name']),
             'email' => trim($_POST['email']),
@@ -110,7 +148,7 @@ if ($action) {
             'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
             'notes' => trim($_POST['notes'] ?? '')
         ], 'id=?', [$id]);
-        sync_athlete_coaches($id, (int)$athleteToUpdate['coach_id'], nullable_int($_POST['secondary_coach_id'] ?? null));
+        sync_athlete_coaches($id, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
 
         $stmt = db()->prepare('UPDATE users u JOIN athletes a ON a.user_id=u.id SET u.name=?, u.email=? WHERE a.id=?');
         $stmt->execute([
@@ -129,10 +167,15 @@ if ($action) {
 
         if (!can_access_athlete($id)) exit('Accès refusé');
 
-        if (!is_primary_coach_for_athlete($id, (int)$user['id'])) exit('Seul le coach principal peut supprimer cet athlète.');
+        if ($user['role'] !== 'super_admin' && !is_primary_coach_for_athlete($id, (int)$user['id'])) exit('Seul le coach principal peut supprimer cet athlète.');
 
-        $stmt = db()->prepare('DELETE FROM athletes WHERE id=? AND coach_id=?');
-        $stmt->execute([$id, $user['id']]);
+        if ($user['role'] === 'super_admin') {
+            $stmt = db()->prepare('DELETE FROM athletes WHERE id=?');
+            $stmt->execute([$id]);
+        } else {
+            $stmt = db()->prepare('DELETE FROM athletes WHERE id=? AND coach_id=?');
+            $stmt->execute([$id, $user['id']]);
+        }
 
         redirect('index.php?page=dashboard');
     }
@@ -316,7 +359,10 @@ function header_html(string $title) {
     <nav class="nav">
         <span class="nav-user"><?=e($u['name'])?> · <?=e($u['role'])?></span>
 
-        <?php if($u['role'] === 'coach'): ?>
+        <?php if($u['role'] === 'coach' || $u['role'] === 'super_admin'): ?>
+            <?php if($u['role'] === 'super_admin'): ?>
+                <a href="index.php?page=admin">Admin</a>
+            <?php endif; ?>
             <a href="index.php?page=dashboard">Athlètes</a>
             <a href="index.php?page=coach_calendar">Calendrier général</a>
             <a href="index.php?page=run_migrations">Migrations</a>
@@ -402,7 +448,7 @@ if ($page === 'login') {
 <div class="auth-body">
     <form class="auth-card" method="post">
         <h1><?=APP_NAME?></h1>
-        <p>Connexion coach ou athlète</p>
+        <p>Connexion coach, athlète ou admin</p>
 
         <?php if($err): ?>
             <div class="alert"><?=e($err)?></div>
@@ -421,6 +467,11 @@ if ($page === 'login') {
             <input type="password" name="password" required>
         </div>
 
+        <label class="remember-choice">
+            <input type="checkbox" name="remember" value="1">
+            <span>Rester connecté</span>
+        </label>
+
         <button class="btn" type="submit">Se connecter</button>
 
         <p style="margin-top:18px;font-size:13px">
@@ -438,6 +489,9 @@ require_login();
 $u = current_user();
 
 if ($page === 'home') {
+    if ($u['role'] === 'super_admin') {
+        redirect('index.php?page=admin');
+    }
     if ($u['role'] === 'coach') {
         redirect('index.php?page=dashboard');
     }
@@ -476,6 +530,88 @@ if ($page === 'run_migrations') {
         <a class="btn secondary" href="index.php?page=coach_calendar">Ouvrir le calendrier</a>
     </div>
 </section>
+<?php
+    footer_html();
+    exit;
+}
+
+if ($page === 'admin') {
+    require_role('super_admin');
+
+    $stmt = db()->prepare('SELECT id, name, email, created_at FROM users WHERE role="coach" ORDER BY created_at DESC, name');
+    $stmt->execute();
+    $coaches = $stmt->fetchAll();
+
+    $stmt = db()->prepare('SELECT COUNT(*) FROM athletes');
+    $stmt->execute();
+    $athleteCount = (int)$stmt->fetchColumn();
+
+    $success = $_SESSION['success'] ?? null;
+    unset($_SESSION['success']);
+
+    header_html('Administration');
+?>
+<?php if($success): ?>
+    <div class="success-alert" role="status"><?=e($success)?></div>
+<?php endif; ?>
+
+<div class="toolbar">
+    <h1>Administration</h1>
+    <div class="actions">
+        <a class="btn secondary" href="index.php?page=dashboard">Voir tous les athlètes</a>
+        <a class="btn secondary" href="index.php?page=coach_calendar">Calendrier général</a>
+    </div>
+</div>
+
+<div class="stats-grid">
+    <section class="stat-card"><strong><?=count($coaches)?></strong><span>Coachs</span></section>
+    <section class="stat-card"><strong><?=$athleteCount?></strong><span>Athlètes</span></section>
+</div>
+
+<div class="grid">
+    <section class="card">
+        <h2>Ajouter un coach</h2>
+        <form method="post">
+            <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+            <input type="hidden" name="action" value="create_coach">
+
+            <div class="field">
+                <label>Nom</label>
+                <input name="name" required>
+            </div>
+
+            <div class="field">
+                <label>Email</label>
+                <input type="email" name="email" required>
+            </div>
+
+            <div class="field">
+                <label>Mot de passe temporaire</label>
+                <input name="password" placeholder="Laisser vide pour password123">
+            </div>
+
+            <button class="btn">Créer le coach</button>
+        </form>
+    </section>
+
+    <section class="card">
+        <h2>Coachs existants</h2>
+        <?php if(!$coaches): ?>
+            <p class="muted-text">Aucun coach pour le moment.</p>
+        <?php endif; ?>
+        <div class="overview-list">
+            <?php foreach($coaches as $coach): ?>
+                <article class="overview-row">
+                    <div>
+                        <strong><?=e($coach['name'])?></strong>
+                        <p><?=e($coach['email'])?></p>
+                    </div>
+                    <span>Créé le <?=e(format_short_date($coach['created_at']))?></span>
+                </article>
+            <?php endforeach; ?>
+        </div>
+    </section>
+</div>
 <?php
     footer_html();
     exit;
@@ -804,12 +940,24 @@ if ($page === 'dashboard') {
                 <textarea name="notes" placeholder="Contraintes, blessures, disponibilites..."></textarea>
             </div>
 
+            <?php if($u['role'] === 'super_admin'): ?>
+                <div class="field">
+                    <label>Coach principal</label>
+                    <select name="primary_coach_id" required>
+                        <option value="">Choisir un coach</option>
+                        <?php foreach($availableCoaches as $coach): ?>
+                            <option value="<?=$coach['id']?>"><?=e($coach['name'].' - '.$coach['email'])?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            <?php endif; ?>
+
             <div class="field">
                 <label>Coach secondaire</label>
                 <select name="secondary_coach_id">
                     <option value="">Aucun</option>
                     <?php foreach($availableCoaches as $coach): ?>
-                        <?php if((int)$coach['id'] === (int)$u['id']) continue; ?>
+                        <?php if($u['role'] !== 'super_admin' && (int)$coach['id'] === (int)$u['id']) continue; ?>
                         <option value="<?=$coach['id']?>"><?=e($coach['name'].' - '.$coach['email'])?></option>
                     <?php endforeach; ?>
                 </select>
@@ -851,7 +999,7 @@ if ($page === 'dashboard') {
                     <a class="btn small" href="index.php?page=calendar&athlete_id=<?=$a['id']?>">Calendrier</a>
                     <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$a['id']?>">Modifier</a>
 
-                    <?php if(is_primary_coach_for_athlete((int)$a['id'], (int)$u['id'])): ?>
+                    <?php if($u['role'] === 'super_admin' || is_primary_coach_for_athlete((int)$a['id'], (int)$u['id'])): ?>
                         <form method="post" onsubmit="return confirm('Supprimer cet athlète ?')">
                             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
                             <input type="hidden" name="action" value="delete_athlete">
@@ -939,6 +1087,19 @@ if ($page === 'edit_athlete') {
             <label>Notes</label>
             <textarea name="notes"><?=e($a['notes'])?></textarea>
         </div>
+
+        <?php if($u['role'] === 'super_admin'): ?>
+            <div class="field">
+                <label>Coach principal</label>
+                <select name="primary_coach_id" required>
+                    <?php foreach($availableCoaches as $coach): ?>
+                        <option value="<?=$coach['id']?>" <?=((int)$a['coach_id'] === (int)$coach['id']) ? 'selected' : ''?>>
+                            <?=e($coach['name'].' - '.$coach['email'])?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+        <?php endif; ?>
 
         <div class="field">
             <label>Coach secondaire</label>
@@ -1170,7 +1331,7 @@ if ($page === 'calendar') {
         <a class="btn secondary" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=$prev?>">Mois précédent</a>
         <a class="btn secondary" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=$next?>">Mois suivant</a>
 
-        <?php if($u['role'] === 'coach'): ?>
+        <?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
             <a class="btn" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=date('Y-m-d')?>">Ajouter une séance</a>
         <?php endif; ?>
     </div>
@@ -1240,7 +1401,7 @@ if ($page === 'calendar') {
             <div class="day-num"><?=$d->format('d/m')?></div>
 
             <?php if(!$daySessions && !$dailyDebrief): ?>
-                <?php if($u['role'] === 'coach'): ?>
+                <?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
                     <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>" title="Ajouter une séance">
                         <span aria-hidden="true">+</span>
                     </a>
@@ -1249,7 +1410,7 @@ if ($page === 'calendar') {
                         <span aria-hidden="true">+</span>
                     </a>
                 <?php endif; ?>
-            <?php elseif($u['role'] === 'coach'): ?>
+            <?php elseif(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
                 <a class="day-add-link" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter une autre séance le <?=e(format_full_date($date))?>">+</a>
             <?php endif; ?>
 
@@ -1474,7 +1635,7 @@ if ($page === 'session') {
             </p>
         </div>
 
-        <?php if($u['role'] === 'coach'): ?>
+        <?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
             <div class="actions">
                 <a class="btn" href="index.php?page=edit_session&id=<?=$s['id']?>">Modifier</a>
 
@@ -1626,7 +1787,7 @@ if ($page === 'session') {
     <?php endif; ?>
 </section>
 
-<?php if($u['role'] === 'coach'): ?>
+<?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
 <section class="card">
     <h2>Actions coach</h2>
 

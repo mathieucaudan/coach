@@ -31,6 +31,22 @@ body{
     margin:0 0 22px
 }
 
+.remember-choice{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    color:#334155;
+    font-size:14px;
+    font-weight:700;
+    margin:-2px 0 16px
+}
+
+.remember-choice input{
+    width:18px;
+    height:18px;
+    accent-color:#111827
+}
+
 .field{
     display:flex;
     flex-direction:column;
