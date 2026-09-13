@@ -304,6 +304,7 @@ function header_html(string $title) {
         <?php if($u['role'] === 'coach'): ?>
             <a href="index.php?page=dashboard">Athlètes</a>
             <a href="index.php?page=coach_calendar">Calendrier général</a>
+            <a href="index.php?page=run_migrations">Migrations</a>
         <?php else: ?>
             <a href="index.php">Calendrier</a>
         <?php endif; ?>
@@ -377,6 +378,40 @@ if ($page === 'home') {
     $a = athlete_for_user($u['id']);
     if (!$a) exit('Aucune fiche athlete rattachee a ce compte.');
     redirect('index.php?page=calendar&athlete_id='.$a['id']);
+}
+
+if ($page === 'run_migrations') {
+    require_role('coach');
+
+    try {
+        $appliedMigrations = run_pending_migrations();
+        $migrationError = null;
+    } catch (Throwable $e) {
+        $appliedMigrations = [];
+        $migrationError = $e->getMessage();
+    }
+
+    header_html('Migrations');
+?>
+<section class="card">
+    <h1>Migrations base de données</h1>
+
+    <?php if($migrationError): ?>
+        <div class="alert">Migration impossible : <?=e($migrationError)?></div>
+    <?php elseif($appliedMigrations): ?>
+        <div class="success-alert" role="status">Migration appliquée : <?=e(implode(', ', $appliedMigrations))?></div>
+    <?php else: ?>
+        <div class="success-alert" role="status">Base déjà à jour.</div>
+    <?php endif; ?>
+
+    <div class="actions">
+        <a class="btn" href="index.php?page=dashboard">Retour dashboard</a>
+        <a class="btn secondary" href="index.php?page=coach_calendar">Ouvrir le calendrier</a>
+    </div>
+</section>
+<?php
+    footer_html();
+    exit;
 }
 
 if ($page === 'dashboard') {
