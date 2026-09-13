@@ -49,6 +49,7 @@ function table_has_column(string $table, string $column): bool {
         'users' => ['id', 'name', 'email', 'password_hash', 'role', 'created_at'],
         'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
         'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
+        'session_debriefs' => ['id', 'session_id', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
         'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
     ];
     if (in_array($column, $knownColumns[$table] ?? [], true)) return true;
@@ -66,6 +67,21 @@ function table_has_column(string $table, string $column): bool {
     }
 
     return $cache[$key];
+}
+
+function table_exists(string $table): bool {
+    static $cache = [];
+    if (array_key_exists($table, $cache)) return $cache[$table];
+
+    try {
+        $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
+        $stmt->execute([$table]);
+        $cache[$table] = (bool)$stmt->fetchColumn();
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+    }
+
+    return $cache[$table];
 }
 
 function sql_optional(string $table, string $alias, string $column, string $fallback): string {
@@ -152,6 +168,142 @@ function nullable_int($value) {
 
 function nullable_float($value) {
     return $value === '' || $value === null ? null : (float)$value;
+}
+
+function weather_options(): array {
+    return [
+        'rain' => ['label' => 'Pluie', 'icon' => '☔'],
+        'wet_surface' => ['label' => 'Revêtement humide', 'icon' => '≈'],
+        'wind' => ['label' => 'Vent', 'icon' => '↝'],
+        'sunny' => ['label' => 'Soleil', 'icon' => '☀'],
+        'cloudy' => ['label' => 'Nuageux', 'icon' => '☁'],
+    ];
+}
+
+function empty_debrief(): array {
+    return [
+        'id' => null,
+        'session_id' => null,
+        'result' => '',
+        'difficulty' => null,
+        'sensations' => '',
+        'weather' => [],
+        'temperature_c' => null,
+        'lactates' => '',
+        'created_at' => null,
+        'updated_at' => null,
+        'exists' => false,
+    ];
+}
+
+function normalize_debrief(array $row): array {
+    $weather = [];
+    if (!empty($row['weather'])) {
+        $decoded = json_decode((string)$row['weather'], true);
+        $weather = is_array($decoded) ? array_values(array_intersect(array_keys(weather_options()), $decoded)) : [];
+    }
+
+    return [
+        'id' => $row['id'] ?? null,
+        'session_id' => $row['session_id'] ?? null,
+        'result' => $row['result'] ?? '',
+        'difficulty' => isset($row['difficulty']) ? (int)$row['difficulty'] : null,
+        'sensations' => $row['sensations'] ?? '',
+        'weather' => $weather,
+        'temperature_c' => $row['temperature_c'] ?? null,
+        'lactates' => $row['lactates'] ?? '',
+        'created_at' => $row['created_at'] ?? null,
+        'updated_at' => $row['updated_at'] ?? null,
+        'exists' => true,
+    ];
+}
+
+function get_debrief_for_session(int $sessionId): array {
+    if (!table_exists('session_debriefs')) return empty_debrief();
+
+    $stmt = db()->prepare('SELECT * FROM session_debriefs WHERE session_id=? LIMIT 1');
+    $stmt->execute([$sessionId]);
+    $row = $stmt->fetch();
+    return $row ? normalize_debrief($row) : empty_debrief();
+}
+
+function attach_debriefs_to_sessions(array $sessions): array {
+    if (!$sessions || !table_exists('session_debriefs')) return $sessions;
+
+    $ids = array_values(array_filter(array_map(function ($session) {
+        return (int)($session['id'] ?? 0);
+    }, $sessions)));
+    if (!$ids) return $sessions;
+
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $stmt = db()->prepare('SELECT * FROM session_debriefs WHERE session_id IN (' . $placeholders . ')');
+    $stmt->execute($ids);
+
+    $debriefs = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $debriefs[(int)$row['session_id']] = normalize_debrief($row);
+    }
+
+    foreach ($sessions as &$session) {
+        $session['debrief'] = $debriefs[(int)$session['id']] ?? empty_debrief();
+    }
+    unset($session);
+
+    return $sessions;
+}
+
+function debrief_summary_status(array $session): string {
+    if (!empty($session['debrief']['exists'])) return 'debriefed';
+    if (($session['date'] ?? '') < date('Y-m-d')) return 'missing';
+    return 'upcoming';
+}
+
+function debrief_status_label(string $status): string {
+    return [
+        'debriefed' => 'Débriefé',
+        'missing' => 'Débrief à compléter',
+        'upcoming' => 'Prévue',
+    ][$status] ?? 'Prévue';
+}
+
+function save_session_debrief(array $session, array $post): void {
+    if (!table_exists('session_debriefs')) {
+        throw new RuntimeException('Migration session_debriefs manquante.');
+    }
+
+    $user = current_user();
+    if (!$user || $user['role'] !== 'athlete') {
+        http_response_code(403);
+        exit('Seul le compte athlète peut modifier le débrief.');
+    }
+
+    $athlete = athlete_for_user((int)$user['id']);
+    if (!$athlete || (int)$athlete['id'] !== (int)$session['athlete_id']) {
+        http_response_code(403);
+        exit('Accès refusé');
+    }
+
+    $weather = array_values(array_intersect(array_keys(weather_options()), $post['weather'] ?? []));
+    $difficulty = nullable_int($post['difficulty'] ?? null);
+    if ($difficulty !== null) $difficulty = max(1, min(10, $difficulty));
+
+    $temperature = $post['temperature_c'] ?? null;
+    $temperature = ($temperature === '' || $temperature === null) ? null : max(-30, min(55, (float)$temperature));
+
+    db()->prepare(
+        'INSERT INTO session_debriefs (session_id,result,difficulty,sensations,weather,temperature_c,lactates,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,NOW(),NOW())
+         ON DUPLICATE KEY UPDATE result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
+         weather=VALUES(weather), temperature_c=VALUES(temperature_c), lactates=VALUES(lactates), updated_at=NOW()'
+    )->execute([
+        (int)$session['id'],
+        trim((string)($post['result'] ?? '')),
+        $difficulty,
+        trim((string)($post['sensations'] ?? '')),
+        json_encode($weather, JSON_UNESCAPED_UNICODE),
+        $temperature,
+        trim((string)($post['lactates'] ?? '')),
+    ]);
 }
 
 function logout_user() {

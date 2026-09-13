@@ -324,6 +324,16 @@ body{
     color:#991b1b
 }
 
+.success-alert{
+    border:1px solid #86efac;
+    border-radius:14px;
+    background:#dcfce7;
+    color:#166534;
+    font-weight:800;
+    margin-bottom:16px;
+    padding:12px 14px
+}
+
 .card{
     background:#fff;
     border:1px solid #e5e7eb;
@@ -412,7 +422,10 @@ body{
 }
 
 .session-pill{
-    display:block;
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto;
+    gap:3px 6px;
+    align-items:start;
     text-decoration:none;
     color:#fff;
     padding:7px 8px;
@@ -421,6 +434,58 @@ body{
     font-weight:900;
     line-height:1.2;
     border:1px solid transparent
+}
+
+.session-title{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis
+}
+
+.session-meta{
+    grid-column:1/-1;
+    opacity:.9;
+    font-size:11px;
+    font-weight:700
+}
+
+.debrief-dot{
+    width:10px;
+    height:10px;
+    border:2px solid #fff;
+    border-radius:999px;
+    box-shadow:0 0 0 1px #0002
+}
+
+.debrief-upcoming{
+    background:#bfdbfe
+}
+
+.debrief-missing{
+    background:#fbbf24
+}
+
+.debrief-debriefed{
+    background:#22c55e
+}
+
+.debrief-badge{
+    margin-left:6px
+}
+
+.debrief-badge.debrief-upcoming{
+    background:#dbeafe;
+    color:#1e40af
+}
+
+.debrief-badge.debrief-missing{
+    background:#fef3c7;
+    color:#92400e
+}
+
+.debrief-badge.debrief-debriefed{
+    background:#dcfce7;
+    color:#166534
 }
 
 /* Types de séances */
@@ -545,6 +610,157 @@ body{
     padding:12px
 }
 
+.highlight-item{
+    border-color:#bfdbfe;
+    background:#eff6ff
+}
+
+.debrief-card{
+    margin-top:16px
+}
+
+.debrief-head{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:12px;
+    margin-bottom:14px
+}
+
+.debrief-head h2{
+    margin-bottom:4px
+}
+
+.debrief-summary{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:12px;
+    margin-bottom:12px
+}
+
+.debrief-form{
+    display:grid;
+    gap:14px;
+    margin-top:14px
+}
+
+.difficulty-field,
+.weather-field{
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    margin:0;
+    padding:12px
+}
+
+.difficulty-field legend,
+.weather-field legend{
+    color:#142033;
+    font-size:13px;
+    font-weight:900;
+    padding:0 6px
+}
+
+.difficulty-scale{
+    display:grid;
+    grid-template-columns:repeat(10,minmax(34px,1fr));
+    gap:6px
+}
+
+.difficulty-choice input,
+.weather-choice input{
+    position:absolute;
+    opacity:0;
+    pointer-events:none
+}
+
+.difficulty-choice span{
+    min-height:38px;
+    border:1px solid #d8dee9;
+    border-radius:12px;
+    background:#fff;
+    color:#334155;
+    display:grid;
+    font-weight:900;
+    place-items:center
+}
+
+.difficulty-choice input:focus-visible + span,
+.weather-choice input:focus-visible + span{
+    outline:3px solid #93c5fd;
+    outline-offset:2px
+}
+
+.difficulty-choice.selected span,
+.difficulty-choice input:checked + span{
+    border-color:#111827;
+    background:#111827;
+    color:#fff
+}
+
+.scale-help{
+    color:#64748b;
+    font-size:12px;
+    margin:8px 0 0
+}
+
+.large-textarea{
+    min-height:140px
+}
+
+.weather-options{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:8px
+}
+
+.weather-choice{
+    position:relative;
+    min-height:44px;
+    border:1px solid #d8dee9;
+    border-radius:14px;
+    background:#fff;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:9px 10px
+}
+
+.weather-choice span{
+    width:26px;
+    height:26px;
+    border-radius:999px;
+    background:#eef2ff;
+    display:grid;
+    place-items:center
+}
+
+.weather-choice strong{
+    font-size:13px
+}
+
+.weather-choice.selected,
+.weather-choice:has(input:checked){
+    border-color:#111827;
+    background:#f8fafc
+}
+
+.weather-read{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    margin-top:10px
+}
+
+.weather-read span{
+    border:1px solid #e5e7eb;
+    border-radius:999px;
+    background:#f8fafc;
+    color:#334155;
+    font-size:13px;
+    font-weight:800;
+    padding:7px 10px
+}
+
 .comment{
     border-left:4px solid #111827;
     background:#f8fafc;
@@ -657,9 +873,17 @@ body{
         padding:4px 5px;
         border-radius:7px;
         font-size:10px;
-        white-space:nowrap;
         overflow:hidden;
         text-overflow:ellipsis
+    }
+
+    .session-meta{
+        display:none
+    }
+
+    .debrief-dot{
+        width:9px;
+        height:9px
     }
 
     .coach-calendar .session-pill{
@@ -719,6 +943,22 @@ body{
 
     .mobile-only{
         display:block
+    }
+
+    .debrief-head{
+        flex-direction:column
+    }
+
+    .difficulty-scale{
+        grid-template-columns:repeat(5,1fr)
+    }
+
+    .difficulty-choice span{
+        min-height:44px
+    }
+
+    .weather-options{
+        grid-template-columns:1fr
     }
 }
 

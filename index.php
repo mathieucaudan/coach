@@ -269,6 +269,13 @@ if ($action) {
 
         redirect('index.php?page=session&id='.$s['id']);
     }
+
+    if ($action === 'save_debrief') {
+        $s = get_session_checked((int)$_POST['session_id']);
+        save_session_debrief($s, $_POST);
+        $_SESSION['success'] = 'Débrief enregistré.';
+        redirect('index.php?page=session&id='.$s['id']);
+    }
 }
 } catch (Throwable $e) {
     http_response_code(500);
@@ -730,7 +737,9 @@ if ($page === 'coach_calendar') {
 
     $sessions = [];
 
-    foreach ($stmt->fetchAll() as $s) {
+    $periodSessions = attach_debriefs_to_sessions($stmt->fetchAll());
+
+    foreach ($periodSessions as $s) {
         $sessions[$s['date']][] = $s;
     }
 
@@ -788,10 +797,14 @@ if ($page === 'coach_calendar') {
         <div class="day <?=$d->format('m') !== $month->format('m') ? 'muted' : ''?>">
             <div class="day-num"><?=$d->format('d/m')?></div>
 
-            <?php foreach($sessions[$date] ?? [] as $s): ?>
+            <?php foreach($sessions[$date] ?? [] as $s):
+                $debriefStatus = debrief_summary_status($s);
+            ?>
                 <a class="session-pill <?=type_class($s['type'])?>" href="index.php?page=session&id=<?=$s['id']?>" title="<?=e($s['first_name'].' '.$s['last_name'].' — '.$s['title'])?>">
                     <span class="session-athlete"><?=e($s['first_name'])?></span>
-                    <?=e($s['title'])?>
+                    <span class="session-title"><?=e($s['title'])?></span>
+                    <span class="session-meta"><?=e($s['type'])?><?=!empty($s['duration_min']) ? ' · '.e($s['duration_min']).' min' : ''?></span>
+                    <span class="debrief-dot debrief-<?=$debriefStatus?>" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
                 </a>
             <?php endforeach; ?>
         </div>
@@ -833,7 +846,9 @@ if ($page === 'calendar') {
     $displayLoad = 0;
     [$currentWeekStart, $currentWeekEnd] = week_bounds();
 
-    foreach ($stmt->fetchAll() as $s) {
+    $periodSessions = attach_debriefs_to_sessions($stmt->fetchAll());
+
+    foreach ($periodSessions as $s) {
         $sessions[$s['date']][] = $s;
         $monthSessions[] = $s;
 
@@ -938,9 +953,13 @@ if ($page === 'calendar') {
                 <a class="btn secondary small" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=$date?>">+</a>
             <?php endif; ?>
 
-            <?php foreach($sessions[$date] ?? [] as $s): ?>
-                <a class="session-pill <?=type_class($s['type'])?>" href="index.php?page=session&id=<?=$s['id']?>">
-                    <?=e($s['title'])?>
+            <?php foreach($sessions[$date] ?? [] as $s):
+                $debriefStatus = debrief_summary_status($s);
+            ?>
+                <a class="session-pill <?=type_class($s['type'])?> debrief-<?=$debriefStatus?>" href="index.php?page=session&id=<?=$s['id']?>" aria-label="<?=e($s['title'].' - '.debrief_status_label($debriefStatus))?>">
+                    <span class="session-title"><?=e($s['title'])?></span>
+                    <span class="session-meta"><?=e($s['type'])?><?=!empty($s['duration_min']) ? ' · '.e($s['duration_min']).' min' : ''?></span>
+                    <span class="debrief-dot debrief-<?=$debriefStatus?>" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
                 </a>
             <?php endforeach; ?>
         </div>
@@ -955,13 +974,18 @@ if ($page === 'calendar') {
         <p class="muted-text">Aucune seance sur cette periode.</p>
     <?php endif; ?>
     <div class="agenda-list">
-        <?php foreach($monthSessions as $s): ?>
+        <?php foreach($monthSessions as $s):
+            $debriefStatus = debrief_summary_status($s);
+        ?>
             <a class="agenda-row" href="index.php?page=session&id=<?=$s['id']?>">
                 <div>
                     <strong><?=e($s['title'])?></strong>
                     <span><?=e(format_full_date($s['date']))?> - <?=e($s['type'])?></span>
                 </div>
-                <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
+                <span>
+                    <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
+                    <span class="status-badge debrief-badge debrief-<?=$debriefStatus?>"><?=e(debrief_status_label($debriefStatus))?></span>
+                </span>
             </a>
         <?php endforeach; ?>
     </div>
@@ -1118,9 +1142,18 @@ if ($page === 'session') {
     $stmt = db()->prepare('SELECT c.*, u.name FROM comments c JOIN users u ON u.id=c.user_id WHERE c.session_id=? ORDER BY c.created_at');
     $stmt->execute([$s['id']]);
     $comments = $stmt->fetchAll();
+    $debrief = get_debrief_for_session((int)$s['id']);
+    $debriefStatus = debrief_summary_status(['date' => $s['date'], 'debrief' => $debrief]);
+    $debriefStorageReady = table_exists('session_debriefs');
+    $canEditDebrief = $u['role'] === 'athlete' && $debriefStorageReady;
+    $success = $_SESSION['success'] ?? null;
+    unset($_SESSION['success']);
 
     header_html('Détail séance');
 ?>
+<?php if($success): ?>
+    <div class="success-alert" role="status"><?=e($success)?><?=!empty($debrief['updated_at']) ? ' · '.e($debrief['updated_at']) : ''?></div>
+<?php endif; ?>
 <section class="card">
     <div class="toolbar">
         <div>
@@ -1131,6 +1164,7 @@ if ($page === 'session') {
                     <?=e($s['type'])?>
                 </span>
                 <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
+                <span class="status-badge debrief-badge debrief-<?=$debriefStatus?>"><?=e(debrief_status_label($debriefStatus))?></span>
             </p>
         </div>
 
@@ -1160,11 +1194,14 @@ if ($page === 'session') {
         </div>
         <?php foreach([
             'description' => 'Description',
+            'objective' => 'Objectif',
             'warmup' => 'Échauffement',
             'main_workout' => 'Corps de séance',
+            'cooldown' => 'Retour au calme',
             'coach_notes' => 'Conseils du coach',
             'athlete_feedback' => 'Retour athlete'
         ] as $k => $label): ?>
+            <?php if(($s[$k] ?? '') === '') continue; ?>
             <div class="detail-item">
                 <strong><?=$label?></strong><br>
                 <?=nl2br(e($s[$k]))?>
@@ -1179,6 +1216,108 @@ if ($page === 'session') {
             <a class="btn secondary" href="<?=e($s['attachment_url'])?>" target="_blank">Pièce jointe</a>
         <?php endif; ?>
     </div>
+</section>
+
+<section class="card debrief-card">
+    <div class="debrief-head">
+        <div>
+            <h2>Débrief de la séance</h2>
+            <p class="muted-text">
+                <?php if($debrief['exists']): ?>
+                    Dernière modification : <?=e($debrief['updated_at'] ?: $debrief['created_at'])?>
+                <?php else: ?>
+                    Aucun débrief enregistré pour le moment.
+                <?php endif; ?>
+            </p>
+        </div>
+        <span class="status-badge debrief-badge debrief-<?=$debriefStatus?>"><?=e(debrief_status_label($debriefStatus))?></span>
+    </div>
+
+    <?php if($debrief['exists']): ?>
+        <div class="debrief-summary">
+            <div class="metric-box"><strong><?=e($debrief['difficulty'] ?: '-')?>/10</strong><span>Difficulté</span></div>
+            <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
+            <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
+        </div>
+        <?php if($debrief['result']): ?>
+            <div class="detail-item highlight-item"><strong>Chronos / résultat</strong><br><?=nl2br(e($debrief['result']))?></div>
+        <?php endif; ?>
+        <?php if($debrief['sensations']): ?>
+            <div class="detail-item highlight-item"><strong>Sensations / commentaires</strong><br><?=nl2br(e($debrief['sensations']))?></div>
+        <?php endif; ?>
+        <?php if($debrief['weather']): ?>
+            <div class="weather-read">
+                <?php foreach($debrief['weather'] as $weatherKey):
+                    $weather = weather_options()[$weatherKey] ?? null;
+                    if (!$weather) continue;
+                ?>
+                    <span><?=e($weather['icon'])?> <?=e($weather['label'])?></span>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if($canEditDebrief): ?>
+        <form class="debrief-form" method="post">
+            <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+            <input type="hidden" name="action" value="save_debrief">
+            <input type="hidden" name="session_id" value="<?=$s['id']?>">
+
+            <div class="field full">
+                <label for="debrief-result">Chronos / résultat de la séance</label>
+                <textarea id="debrief-result" name="result" placeholder="Ex : 6 × 1000 m : 3'42 / 3'40 / 3'41"><?=e($debrief['result'])?></textarea>
+            </div>
+
+            <fieldset class="difficulty-field">
+                <legend>Difficulté</legend>
+                <div class="difficulty-scale" role="radiogroup" aria-label="Difficulté de 1 à 10">
+                    <?php for($i = 1; $i <= 10; $i++): ?>
+                        <label class="difficulty-choice <?=$debrief['difficulty'] === $i ? 'selected' : ''?>">
+                            <input type="radio" name="difficulty" value="<?=$i?>" <?=$debrief['difficulty'] === $i ? 'checked' : ''?>>
+                            <span><?=$i?></span>
+                        </label>
+                    <?php endfor; ?>
+                </div>
+                <p class="scale-help">1 très facile · 5 moyen · 10 très difficile</p>
+            </fieldset>
+
+            <div class="field full">
+                <label for="debrief-sensations">Sensations / commentaires / douleurs / gênes</label>
+                <textarea id="debrief-sensations" name="sensations" class="large-textarea" placeholder="Fatigue, douleurs, contexte, bonnes sensations, informations utiles au coach..."><?=e($debrief['sensations'])?></textarea>
+            </div>
+
+            <fieldset class="weather-field">
+                <legend>Météo</legend>
+                <div class="weather-options">
+                    <?php foreach(weather_options() as $key => $weather): ?>
+                        <label class="weather-choice <?=in_array($key, $debrief['weather'], true) ? 'selected' : ''?>">
+                            <input type="checkbox" name="weather[]" value="<?=$key?>" <?=in_array($key, $debrief['weather'], true) ? 'checked' : ''?>>
+                            <span aria-hidden="true"><?=e($weather['icon'])?></span>
+                            <strong><?=e($weather['label'])?></strong>
+                        </label>
+                    <?php endforeach; ?>
+                </div>
+            </fieldset>
+
+            <div class="form-grid">
+                <div class="field">
+                    <label for="debrief-temperature">Température (°C)</label>
+                    <input id="debrief-temperature" type="number" name="temperature_c" min="-30" max="55" step="0.5" value="<?=e($debrief['temperature_c'] ?? '')?>">
+                </div>
+
+                <div class="field">
+                    <label for="debrief-lactates">Lactates</label>
+                    <input id="debrief-lactates" name="lactates" value="<?=e($debrief['lactates'])?>" placeholder="Ex : 2.1 mmol/L ou Non mesuré">
+                </div>
+            </div>
+
+            <button class="btn" type="submit">Enregistrer le débrief</button>
+        </form>
+    <?php elseif(!$debriefStorageReady): ?>
+        <div class="alert">La migration de débrief n'a pas encore été appliquée. Lance le script SQL ajouté dans migrations.</div>
+    <?php elseif(!$debrief['exists']): ?>
+        <p class="muted-text">Le débrief sera visible ici dès que l'athlète l'aura enregistré.</p>
+    <?php endif; ?>
 </section>
 
 <?php if($u['role'] === 'coach'): ?>
