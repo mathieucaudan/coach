@@ -362,10 +362,10 @@ function header_html(string $title) {
         <?php if($u['role'] === 'coach' || $u['role'] === 'super_admin'): ?>
             <?php if($u['role'] === 'super_admin'): ?>
                 <a href="index.php?page=admin">Admin</a>
+                <a href="index.php?page=run_migrations">Migrations</a>
             <?php endif; ?>
             <a href="index.php?page=dashboard">Athlètes</a>
             <a href="index.php?page=coach_calendar">Calendrier général</a>
-            <a href="index.php?page=run_migrations">Migrations</a>
         <?php else: ?>
             <a href="index.php">Calendrier</a>
         <?php endif; ?>
@@ -502,7 +502,7 @@ if ($page === 'home') {
 }
 
 if ($page === 'run_migrations') {
-    require_role('coach');
+    require_role('super_admin');
 
     try {
         $appliedMigrations = run_pending_migrations();
