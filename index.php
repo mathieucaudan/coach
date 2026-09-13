@@ -276,6 +276,23 @@ if ($action) {
         $_SESSION['success'] = 'Débrief enregistré.';
         redirect('index.php?page=session&id='.$s['id']);
     }
+
+    if ($action === 'save_daily_debrief') {
+        $athleteId = (int)$_POST['athlete_id'];
+        $date = $_POST['date'] ?? '';
+        save_daily_debrief($athleteId, $date, $_POST);
+        $_SESSION['success'] = 'Retour journalier enregistré.';
+        redirect('index.php?page=daily_debrief&athlete_id='.$athleteId.'&date='.$date);
+    }
+
+    if ($action === 'quick_session') {
+        require_role('coach');
+        $athleteId = (int)$_POST['athlete_id'];
+        $date = $_POST['date'] ?? '';
+        $sessionId = create_quick_session($athleteId, $date, $_POST['title'] ?? '', $_POST['description'] ?? '');
+        $_SESSION['success'] = 'Séance ajoutée.';
+        redirect('index.php?page=session&id='.$sessionId);
+    }
 }
 } catch (Throwable $e) {
     http_response_code(500);
@@ -324,6 +341,58 @@ function header_html(string $title) {
 
 function footer_html() {
     echo '</main></body></html>';
+}
+
+function debrief_form_fields(array $debrief): void {
+?>
+    <div class="field full">
+        <label for="debrief-result">Chronos / résultat</label>
+        <textarea id="debrief-result" name="result" placeholder="Ex : 10 km en 42'15, footing 1h15 - 14,2 km"><?=e($debrief['result'])?></textarea>
+    </div>
+
+    <fieldset class="difficulty-field">
+        <legend>Difficulté</legend>
+        <div class="difficulty-scale" role="radiogroup" aria-label="Difficulté de 1 à 10">
+            <?php for($i = 1; $i <= 10; $i++): ?>
+                <label class="difficulty-choice <?=$debrief['difficulty'] === $i ? 'selected' : ''?>">
+                    <input type="radio" name="difficulty" value="<?=$i?>" <?=$debrief['difficulty'] === $i ? 'checked' : ''?>>
+                    <span><?=$i?></span>
+                </label>
+            <?php endfor; ?>
+        </div>
+        <p class="scale-help">1 très facile · 5 moyen · 10 très difficile</p>
+    </fieldset>
+
+    <div class="field full">
+        <label for="debrief-sensations">Sensations / commentaires / douleurs / gênes</label>
+        <textarea id="debrief-sensations" name="sensations" class="large-textarea" placeholder="Fatigue, douleurs, contexte, bonnes sensations, informations utiles au coach..."><?=e($debrief['sensations'])?></textarea>
+    </div>
+
+    <fieldset class="weather-field">
+        <legend>Météo</legend>
+        <div class="weather-options">
+            <?php foreach(weather_options() as $key => $weather): ?>
+                <label class="weather-choice <?=in_array($key, $debrief['weather'], true) ? 'selected' : ''?>">
+                    <input type="checkbox" name="weather[]" value="<?=$key?>" <?=in_array($key, $debrief['weather'], true) ? 'checked' : ''?>>
+                    <span aria-hidden="true"><?=e($weather['icon'])?></span>
+                    <strong><?=e($weather['label'])?></strong>
+                </label>
+            <?php endforeach; ?>
+        </div>
+    </fieldset>
+
+    <div class="form-grid">
+        <div class="field">
+            <label for="debrief-temperature">Température (°C)</label>
+            <input id="debrief-temperature" type="number" name="temperature_c" min="-30" max="55" step="0.5" value="<?=e($debrief['temperature_c'] ?? '')?>">
+        </div>
+
+        <div class="field">
+            <label for="debrief-lactates">Lactates</label>
+            <input id="debrief-lactates" name="lactates" value="<?=e($debrief['lactates'])?>" placeholder="Ex : 2.1 mmol/L ou Non mesuré">
+        </div>
+    </div>
+<?php
 }
 
 if ($page === 'login') {
@@ -408,6 +477,122 @@ if ($page === 'run_migrations') {
         <a class="btn" href="index.php?page=dashboard">Retour dashboard</a>
         <a class="btn secondary" href="index.php?page=coach_calendar">Ouvrir le calendrier</a>
     </div>
+</section>
+<?php
+    footer_html();
+    exit;
+}
+
+if ($page === 'daily_debrief') {
+    $athleteId = (int)($_GET['athlete_id'] ?? 0);
+    $date = $_GET['date'] ?? date('Y-m-d');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || !can_access_athlete($athleteId)) exit('Accès refusé');
+
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
+    $stmt->execute([$athleteId]);
+    $a = $stmt->fetch();
+
+    $stmt = db()->prepare('SELECT id FROM sessions WHERE athlete_id=? AND date=? ORDER BY id LIMIT 1');
+    $stmt->execute([$athleteId, $date]);
+    $existingSessionId = $stmt->fetchColumn();
+    if ($existingSessionId) redirect('index.php?page=session&id='.(int)$existingSessionId);
+
+    $debriefStorageReady = table_exists('daily_debriefs');
+    $debrief = get_daily_debrief($athleteId, $date);
+    $canEditDebrief = $u['role'] === 'athlete' && $debriefStorageReady;
+    $success = $_SESSION['success'] ?? null;
+    unset($_SESSION['success']);
+
+    header_html('Retour journalier');
+?>
+<?php if($success): ?>
+    <div class="success-alert" role="status"><?=e($success)?><?=!empty($debrief['updated_at']) ? ' · '.e($debrief['updated_at']) : ''?></div>
+<?php endif; ?>
+<section class="card debrief-card">
+    <div class="debrief-head">
+        <div>
+            <h1>Retour du <?=e(format_full_date($date))?></h1>
+            <p class="muted-text"><?=e($a['first_name'].' '.$a['last_name'])?> · Aucune séance planifiée ce jour.</p>
+        </div>
+        <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=e(substr($date, 0, 7))?>">Retour calendrier</a>
+    </div>
+
+    <?php if($debrief['exists']): ?>
+        <div class="debrief-summary">
+            <div class="metric-box"><strong><?=e($debrief['difficulty'] ?: '-')?>/10</strong><span>Difficulté</span></div>
+            <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
+            <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
+        </div>
+        <?php if($debrief['result']): ?>
+            <div class="detail-item highlight-item"><strong>Chronos / résultat</strong><br><?=nl2br(e($debrief['result']))?></div>
+        <?php endif; ?>
+        <?php if($debrief['sensations']): ?>
+            <div class="detail-item highlight-item"><strong>Sensations / commentaires</strong><br><?=nl2br(e($debrief['sensations']))?></div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if($canEditDebrief): ?>
+        <form class="debrief-form" method="post">
+            <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+            <input type="hidden" name="action" value="save_daily_debrief">
+            <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
+            <input type="hidden" name="date" value="<?=e($date)?>">
+            <?php debrief_form_fields($debrief); ?>
+            <button class="btn" type="submit">Enregistrer le retour</button>
+        </form>
+    <?php elseif(!$debriefStorageReady): ?>
+        <div class="alert">La migration des retours journaliers n'a pas encore été appliquée. Lance la page Migrations.</div>
+    <?php elseif(!$debrief['exists']): ?>
+        <p class="muted-text">Aucun retour enregistré pour cette journée.</p>
+    <?php endif; ?>
+</section>
+<?php
+    footer_html();
+    exit;
+}
+
+if ($page === 'quick_session') {
+    require_role('coach');
+    $athleteId = (int)($_GET['athlete_id'] ?? 0);
+    $date = $_GET['date'] ?? date('Y-m-d');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || !can_access_athlete($athleteId)) exit('Accès refusé');
+
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
+    $stmt->execute([$athleteId]);
+    $a = $stmt->fetch();
+
+    header_html('Ajouter une séance');
+?>
+<section class="card">
+    <div class="debrief-head">
+        <div>
+            <h1>Ajouter une séance</h1>
+            <p class="muted-text"><?=e($a['first_name'].' '.$a['last_name'])?> · <?=e(format_full_date($date))?></p>
+        </div>
+        <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=e(substr($date, 0, 7))?>">Retour calendrier</a>
+    </div>
+
+    <form method="post" class="debrief-form">
+        <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+        <input type="hidden" name="action" value="quick_session">
+        <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
+        <input type="hidden" name="date" value="<?=e($date)?>">
+
+        <div class="field">
+            <label for="quick-title">Titre</label>
+            <input id="quick-title" name="title" required autofocus>
+        </div>
+
+        <div class="field">
+            <label for="quick-description">Description</label>
+            <textarea id="quick-description" name="description" class="large-textarea"></textarea>
+        </div>
+
+        <div class="actions">
+            <button class="btn" type="submit">Ajouter la séance</button>
+            <a class="btn secondary" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=e($date)?>">Formulaire complet</a>
+        </div>
+    </form>
 </section>
 <?php
     footer_html();
@@ -777,6 +962,9 @@ if ($page === 'coach_calendar') {
     foreach ($periodSessions as $s) {
         $sessions[$s['date']][] = $s;
     }
+    $dailyDebriefs = $selectedAthleteId > 0
+        ? attach_daily_debriefs_to_calendar($sessions, $selectedAthleteId, $start, $end)
+        : [];
 
     header_html('Calendrier général');
 
@@ -828,11 +1016,26 @@ if ($page === 'coach_calendar') {
 
     while ($d <= $end):
         $date = $d->format('Y-m-d');
+        $daySessions = $sessions[$date] ?? [];
+        $dailyDebrief = $dailyDebriefs[$date] ?? null;
     ?>
         <div class="day <?=$d->format('m') !== $month->format('m') ? 'muted' : ''?>">
             <div class="day-num"><?=$d->format('d/m')?></div>
 
-            <?php foreach($sessions[$date] ?? [] as $s):
+            <?php if($selectedAthleteId > 0 && !$daySessions): ?>
+                <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>">
+                    <span>Ajouter séance</span>
+                </a>
+            <?php endif; ?>
+
+            <?php if($dailyDebrief): ?>
+                <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>">
+                    <span>Retour libre</span>
+                    <span class="debrief-dot debrief-debriefed" aria-label="Retour enregistré"></span>
+                </a>
+            <?php endif; ?>
+
+            <?php foreach($daySessions as $s):
                 $debriefStatus = debrief_summary_status($s);
             ?>
                 <a class="session-pill <?=type_class($s['type'])?>" href="index.php?page=session&id=<?=$s['id']?>" title="<?=e($s['first_name'].' '.$s['last_name'].' — '.$s['title'])?>">
@@ -901,6 +1104,7 @@ if ($page === 'calendar') {
 
         $displayLoad += (int)($s['actual_duration_min'] ?: ($s['duration_min'] ?: 0));
     }
+    $dailyDebriefs = attach_daily_debriefs_to_calendar($sessions, $athleteId, $start, $end);
 
     header_html('Calendrier');
 
@@ -980,15 +1184,34 @@ if ($page === 'calendar') {
 
     while ($d <= $end):
         $date = $d->format('Y-m-d');
+        $daySessions = $sessions[$date] ?? [];
+        $dailyDebrief = $dailyDebriefs[$date] ?? null;
     ?>
         <div class="day <?=$d->format('m') !== $month->format('m') ? 'muted' : ''?>">
             <div class="day-num"><?=$d->format('d/m')?></div>
 
-            <?php if($u['role'] === 'coach'): ?>
-                <a class="btn secondary small" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=$date?>">+</a>
+            <?php if(!$daySessions && !$dailyDebrief): ?>
+                <?php if($u['role'] === 'coach'): ?>
+                    <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>">
+                        <span>Ajouter séance</span>
+                    </a>
+                <?php elseif($u['role'] === 'athlete'): ?>
+                    <a class="empty-day-action" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter un retour le <?=e(format_full_date($date))?>">
+                        <span>Retour libre</span>
+                    </a>
+                <?php endif; ?>
+            <?php elseif($u['role'] === 'coach'): ?>
+                <a class="day-add-link" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Ajouter une autre séance le <?=e(format_full_date($date))?>">+</a>
             <?php endif; ?>
 
-            <?php foreach($sessions[$date] ?? [] as $s):
+            <?php if($dailyDebrief): ?>
+                <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>">
+                    <span>Retour libre</span>
+                    <span class="debrief-dot debrief-debriefed" aria-label="Retour enregistré"></span>
+                </a>
+            <?php endif; ?>
+
+            <?php foreach($daySessions as $s):
                 $debriefStatus = debrief_summary_status($s);
             ?>
                 <a class="session-pill <?=type_class($s['type'])?> debrief-<?=$debriefStatus?>" href="index.php?page=session&id=<?=$s['id']?>" aria-label="<?=e($s['title'].' - '.debrief_status_label($debriefStatus))?>">

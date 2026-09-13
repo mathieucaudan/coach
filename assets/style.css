@@ -449,6 +449,68 @@ body{
     font-weight:700
 }
 
+.empty-day-action{
+    min-height:54px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border:1px dashed #cbd5e1;
+    border-radius:12px;
+    color:#64748b;
+    background:#f8fafc;
+    text-decoration:none;
+    font-size:12px;
+    font-weight:800;
+    text-align:center;
+    transition:.18s ease
+}
+
+.empty-day-action:hover,
+.empty-day-action:focus-visible{
+    color:#0f766e;
+    border-color:#14b8a6;
+    background:#ecfeff;
+    outline:none
+}
+
+.day-add-link{
+    width:28px;
+    height:28px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    align-self:flex-start;
+    border:1px solid #cbd5e1;
+    border-radius:999px;
+    color:#0f766e;
+    background:#fff;
+    text-decoration:none;
+    font-weight:900;
+    line-height:1
+}
+
+.day-add-link:hover,
+.day-add-link:focus-visible{
+    background:#ecfeff;
+    border-color:#14b8a6;
+    outline:none
+}
+
+.daily-debrief-pill{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto;
+    align-items:center;
+    gap:6px;
+    padding:7px 8px;
+    border-radius:10px;
+    background:#eef2ff;
+    color:#3730a3;
+    border:1px solid #c7d2fe;
+    text-decoration:none;
+    font-size:12px;
+    font-weight:900
+}
+
 .debrief-dot{
     width:10px;
     height:10px;

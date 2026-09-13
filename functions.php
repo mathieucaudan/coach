@@ -50,6 +50,7 @@ function table_has_column(string $table, string $column): bool {
         'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
         'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
         'session_debriefs' => ['id', 'session_id', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
+        'daily_debriefs' => ['id', 'athlete_id', 'date', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
         'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
     ];
     if (in_array($column, $knownColumns[$table] ?? [], true)) return true;
@@ -227,6 +228,42 @@ function get_debrief_for_session(int $sessionId): array {
     return $row ? normalize_debrief($row) : empty_debrief();
 }
 
+function normalize_daily_debrief(array $row): array {
+    $debrief = normalize_debrief($row);
+    $debrief['athlete_id'] = $row['athlete_id'] ?? null;
+    $debrief['date'] = $row['date'] ?? null;
+    return $debrief;
+}
+
+function get_daily_debrief(int $athleteId, string $date): array {
+    if (!table_exists('daily_debriefs')) return empty_debrief();
+    if (!can_access_athlete($athleteId)) {
+        http_response_code(403);
+        exit('Accès refusé');
+    }
+
+    $stmt = db()->prepare('SELECT * FROM daily_debriefs WHERE athlete_id=? AND date=? LIMIT 1');
+    $stmt->execute([$athleteId, $date]);
+    $row = $stmt->fetch();
+    return $row ? normalize_daily_debrief($row) : empty_debrief();
+}
+
+function attach_daily_debriefs_to_calendar(array $sessionsByDate, int $athleteId, DateTime $start, DateTime $end): array {
+    if (!table_exists('daily_debriefs')) return [];
+
+    $stmt = db()->prepare('SELECT * FROM daily_debriefs WHERE athlete_id=? AND date BETWEEN ? AND ?');
+    $stmt->execute([$athleteId, $start->format('Y-m-d'), $end->format('Y-m-d')]);
+
+    $dailyDebriefs = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $date = $row['date'];
+        if (!empty($sessionsByDate[$date])) continue;
+        $dailyDebriefs[$date] = normalize_daily_debrief($row);
+    }
+
+    return $dailyDebriefs;
+}
+
 function attach_debriefs_to_sessions(array $sessions): array {
     if (!$sessions || !table_exists('session_debriefs')) return $sessions;
 
@@ -306,6 +343,99 @@ function save_session_debrief(array $session, array $post): void {
     ]);
 }
 
+function assert_athlete_owns_athlete_id(int $athleteId): void {
+    $user = current_user();
+    if (!$user || $user['role'] !== 'athlete') {
+        http_response_code(403);
+        exit('Seul le compte athlète peut modifier ce retour.');
+    }
+
+    $athlete = athlete_for_user((int)$user['id']);
+    if (!$athlete || (int)$athlete['id'] !== $athleteId) {
+        http_response_code(403);
+        exit('Accès refusé');
+    }
+}
+
+function parse_debrief_payload(array $post): array {
+    $weather = array_values(array_intersect(array_keys(weather_options()), $post['weather'] ?? []));
+    $difficulty = nullable_int($post['difficulty'] ?? null);
+    if ($difficulty !== null) $difficulty = max(1, min(10, $difficulty));
+
+    $temperature = $post['temperature_c'] ?? null;
+    $temperature = ($temperature === '' || $temperature === null) ? null : max(-30, min(55, (float)$temperature));
+
+    return [
+        'result' => trim((string)($post['result'] ?? '')),
+        'difficulty' => $difficulty,
+        'sensations' => trim((string)($post['sensations'] ?? '')),
+        'weather' => json_encode($weather, JSON_UNESCAPED_UNICODE),
+        'temperature_c' => $temperature,
+        'lactates' => trim((string)($post['lactates'] ?? '')),
+    ];
+}
+
+function save_daily_debrief(int $athleteId, string $date, array $post): void {
+    if (!table_exists('daily_debriefs')) {
+        throw new RuntimeException('Migration daily_debriefs manquante.');
+    }
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        throw new InvalidArgumentException('Date invalide.');
+    }
+
+    assert_athlete_owns_athlete_id($athleteId);
+    $payload = parse_debrief_payload($post);
+
+    db()->prepare(
+        'INSERT INTO daily_debriefs (athlete_id,date,result,difficulty,sensations,weather,temperature_c,lactates,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())
+         ON DUPLICATE KEY UPDATE result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
+         weather=VALUES(weather), temperature_c=VALUES(temperature_c), lactates=VALUES(lactates), updated_at=NOW()'
+    )->execute([
+        $athleteId,
+        $date,
+        $payload['result'],
+        $payload['difficulty'],
+        $payload['sensations'],
+        $payload['weather'],
+        $payload['temperature_c'],
+        $payload['lactates'],
+    ]);
+}
+
+function create_quick_session(int $athleteId, string $date, string $title, string $description): int {
+    $user = current_user();
+    if (!$user || $user['role'] !== 'coach' || !can_access_athlete($athleteId)) {
+        http_response_code(403);
+        exit('Accès refusé');
+    }
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        throw new InvalidArgumentException('Date invalide.');
+    }
+
+    $values = [
+        'athlete_id' => $athleteId,
+        'coach_id' => $user['id'],
+        'date' => $date,
+        'title' => trim($title) ?: 'Séance',
+        'type' => 'footing',
+        'status' => 'planned',
+        'intensity' => 'moderate',
+        'description' => trim($description),
+        'objective' => '',
+        'warmup' => '',
+        'main_workout' => '',
+        'cooldown' => '',
+        'coach_notes' => '',
+    ];
+
+    return db_insert('sessions', array_filter(
+        $values,
+        function ($column) { return table_has_column('sessions', (string)$column); },
+        ARRAY_FILTER_USE_KEY
+    ));
+}
+
 function run_pending_migrations(): array {
     $applied = [];
 
@@ -331,6 +461,31 @@ function run_pending_migrations(): array {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
         $applied[] = 'session_debriefs';
+    }
+
+    if (!table_exists('daily_debriefs')) {
+        db()->exec(
+            'CREATE TABLE daily_debriefs (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                athlete_id INT NOT NULL,
+                date DATE NOT NULL,
+                result TEXT NULL,
+                difficulty TINYINT UNSIGNED NULL,
+                sensations TEXT NULL,
+                weather JSON NULL,
+                temperature_c DECIMAL(4,1) NULL,
+                lactates TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_daily_debriefs_athlete_date (athlete_id, date),
+                CONSTRAINT chk_daily_debriefs_difficulty CHECK (difficulty IS NULL OR difficulty BETWEEN 1 AND 10),
+                CONSTRAINT fk_daily_debriefs_athlete
+                    FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        $applied[] = 'daily_debriefs';
     }
 
     return $applied;
