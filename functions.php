@@ -48,6 +48,7 @@ function table_has_column(string $table, string $column): bool {
     $knownColumns = [
         'users' => ['id', 'name', 'email', 'password_hash', 'role', 'created_at'],
         'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
+        'athlete_coaches' => ['athlete_id', 'coach_id', 'created_at'],
         'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
         'session_debriefs' => ['id', 'session_id', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
         'daily_debriefs' => ['id', 'athlete_id', 'date', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
@@ -439,6 +440,28 @@ function create_quick_session(int $athleteId, string $date, string $title, strin
 function run_pending_migrations(): array {
     $applied = [];
 
+    if (!table_exists('athlete_coaches')) {
+        db()->exec(
+            'CREATE TABLE athlete_coaches (
+                athlete_id INT NOT NULL,
+                coach_id INT NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (athlete_id, coach_id),
+                CONSTRAINT fk_athlete_coaches_athlete
+                    FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_athlete_coaches_coach
+                    FOREIGN KEY (coach_id) REFERENCES users(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        db()->exec(
+            'INSERT IGNORE INTO athlete_coaches (athlete_id, coach_id, created_at)
+             SELECT id, coach_id, NOW() FROM athletes WHERE coach_id IS NOT NULL'
+        );
+        $applied[] = 'athlete_coaches';
+    }
+
     if (!table_exists('session_debriefs')) {
         db()->exec(
             'CREATE TABLE session_debriefs (
@@ -536,12 +559,78 @@ function athlete_for_user(int $userId) {
     return $stmt->fetch() ?: null;
 }
 
+function athlete_coaches_ready(): bool {
+    return table_exists('athlete_coaches');
+}
+
+function coach_athlete_where(string $alias = 'a'): string {
+    if (!athlete_coaches_ready()) return $alias . '.coach_id = ?';
+
+    return '(' . $alias . '.coach_id = ? OR EXISTS (
+        SELECT 1 FROM athlete_coaches ac
+        WHERE ac.athlete_id = ' . $alias . '.id AND ac.coach_id = ?
+    ))';
+}
+
+function coach_athlete_params(int $coachId): array {
+    return athlete_coaches_ready() ? [$coachId, $coachId] : [$coachId];
+}
+
+function is_primary_coach_for_athlete(int $athleteId, int $coachId): bool {
+    $stmt = db()->prepare('SELECT id FROM athletes WHERE id=? AND coach_id=?');
+    $stmt->execute([$athleteId, $coachId]);
+    return (bool)$stmt->fetch();
+}
+
+function get_coaches_for_athlete(int $athleteId): array {
+    if (!athlete_coaches_ready()) {
+        $stmt = db()->prepare('SELECT u.id, u.name, u.email FROM users u JOIN athletes a ON a.coach_id=u.id WHERE a.id=?');
+        $stmt->execute([$athleteId]);
+        return $stmt->fetchAll();
+    }
+
+    $stmt = db()->prepare(
+        'SELECT u.id, u.name, u.email
+         FROM athlete_coaches ac
+         JOIN users u ON u.id=ac.coach_id
+         WHERE ac.athlete_id=?
+         ORDER BY u.name'
+    );
+    $stmt->execute([$athleteId]);
+    return $stmt->fetchAll();
+}
+
+function get_available_coaches(): array {
+    $stmt = db()->prepare('SELECT id, name, email FROM users WHERE role="coach" ORDER BY name, email');
+    $stmt->execute();
+    return $stmt->fetchAll();
+}
+
+function sync_athlete_coaches(int $athleteId, int $primaryCoachId, ?int $secondaryCoachId = null): void {
+    if (!athlete_coaches_ready()) return;
+
+    db()->prepare('INSERT IGNORE INTO athlete_coaches (athlete_id, coach_id, created_at) VALUES (?,?,NOW())')
+        ->execute([$athleteId, $primaryCoachId]);
+
+    db()->prepare('DELETE FROM athlete_coaches WHERE athlete_id=? AND coach_id<>?')
+        ->execute([$athleteId, $primaryCoachId]);
+
+    if ($secondaryCoachId && $secondaryCoachId !== $primaryCoachId) {
+        $stmt = db()->prepare('SELECT id FROM users WHERE id=? AND role="coach"');
+        $stmt->execute([$secondaryCoachId]);
+        if ($stmt->fetch()) {
+            db()->prepare('INSERT IGNORE INTO athlete_coaches (athlete_id, coach_id, created_at) VALUES (?,?,NOW())')
+                ->execute([$athleteId, $secondaryCoachId]);
+        }
+    }
+}
+
 function can_access_athlete(int $athleteId): bool {
     $user = current_user();
     if (!$user) return false;
     if ($user['role'] === 'coach') {
-        $stmt = db()->prepare('SELECT id FROM athletes WHERE id = ? AND coach_id = ?');
-        $stmt->execute([$athleteId, $user['id']]);
+        $stmt = db()->prepare('SELECT a.id FROM athletes a WHERE a.id = ? AND ' . coach_athlete_where('a'));
+        $stmt->execute(array_merge([$athleteId], coach_athlete_params((int)$user['id'])));
         return (bool)$stmt->fetch();
     }
     $athlete = athlete_for_user((int)$user['id']);

@@ -70,7 +70,7 @@ if ($action) {
 
         $userId = (int)db()->lastInsertId();
 
-        db_insert('athletes', [
+        $athleteId = db_insert('athletes', [
             'coach_id' => $user['id'],
             'user_id' => $userId,
             'first_name' => trim($_POST['first_name']),
@@ -82,6 +82,7 @@ if ($action) {
             'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
             'notes' => trim($_POST['notes'] ?? '')
         ]);
+        sync_athlete_coaches($athleteId, (int)$user['id'], nullable_int($_POST['secondary_coach_id'] ?? null));
 
         db()->commit();
 
@@ -95,6 +96,10 @@ if ($action) {
 
         if (!can_access_athlete($id)) exit('Accès refusé');
 
+        $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
+        $stmt->execute([$id]);
+        $athleteToUpdate = $stmt->fetch();
+
         db_update('athletes', [
             'first_name' => trim($_POST['first_name']),
             'last_name' => trim($_POST['last_name']),
@@ -104,7 +109,8 @@ if ($action) {
             'goal' => trim($_POST['goal'] ?? ''),
             'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
             'notes' => trim($_POST['notes'] ?? '')
-        ], 'id=? AND coach_id=?', [$id, $user['id']]);
+        ], 'id=?', [$id]);
+        sync_athlete_coaches($id, (int)$athleteToUpdate['coach_id'], nullable_int($_POST['secondary_coach_id'] ?? null));
 
         $stmt = db()->prepare('UPDATE users u JOIN athletes a ON a.user_id=u.id SET u.name=?, u.email=? WHERE a.id=?');
         $stmt->execute([
@@ -122,6 +128,8 @@ if ($action) {
         $id = (int)$_POST['id'];
 
         if (!can_access_athlete($id)) exit('Accès refusé');
+
+        if (!is_primary_coach_for_athlete($id, (int)$user['id'])) exit('Seul le coach principal peut supprimer cet athlète.');
 
         $stmt = db()->prepare('DELETE FROM athletes WHERE id=? AND coach_id=?');
         $stmt->execute([$id, $user['id']]);
@@ -162,7 +170,7 @@ if ($action) {
                 'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
                 'attachment_url' => $attachment,
                 'external_link' => $_POST['external_link'] ?: null
-            ], 'id=? AND coach_id=?', [(int)$_POST['id'], $user['id']]);
+            ], 'id=?', [(int)$_POST['id']]);
         } else {
             db_insert('sessions', [
                 'athlete_id' => $athleteId,
@@ -197,10 +205,7 @@ if ($action) {
 
         $s = get_session_checked((int)$_POST['id']);
 
-        db()->prepare('DELETE FROM sessions WHERE id=? AND coach_id=?')->execute([
-            $s['id'],
-            $user['id']
-        ]);
+        db()->prepare('DELETE FROM sessions WHERE id=?')->execute([$s['id']]);
 
         redirect('index.php?page=calendar&athlete_id='.$s['athlete_id']);
     }
@@ -211,35 +216,29 @@ if ($action) {
         $s = get_session_checked((int)$_POST['id']);
         $date = $_POST['new_date'];
 
-        $columns = array_values(array_filter([
-            'athlete_id',
-            'coach_id',
-            'date',
-            'title',
-            'type',
-            'status',
-            'intensity',
-            'duration_min',
-            'vma_percent',
-            'description',
-            'objective',
-            'warmup',
-            'main_workout',
-            'cooldown',
-            'coach_notes',
-            'actual_duration_min',
-            'feeling',
-            'pain',
-            'athlete_feedback',
-            'attachment_url',
-            'external_link',
-        ], function ($column) { return table_has_column('sessions', $column); }));
-        $selects = array_map(function ($column) { return $column === 'date' ? '?' : $column; }, $columns);
-
-        db()->prepare(
-            'INSERT INTO sessions (' . implode(',', $columns) . ') SELECT ' .
-            implode(',', $selects) . ' FROM sessions WHERE id=?'
-        )->execute([$date, $s['id']]);
+        db_insert('sessions', [
+            'athlete_id' => $s['athlete_id'],
+            'coach_id' => $user['id'],
+            'date' => $date,
+            'title' => $s['title'],
+            'type' => $s['type'],
+            'status' => $s['status'],
+            'intensity' => $s['intensity'],
+            'duration_min' => $s['duration_min'],
+            'vma_percent' => $s['vma_percent'],
+            'description' => $s['description'],
+            'objective' => $s['objective'],
+            'warmup' => $s['warmup'],
+            'main_workout' => $s['main_workout'],
+            'cooldown' => $s['cooldown'],
+            'coach_notes' => $s['coach_notes'],
+            'actual_duration_min' => $s['actual_duration_min'],
+            'feeling' => $s['feeling'],
+            'pain' => $s['pain'],
+            'athlete_feedback' => $s['athlete_feedback'],
+            'attachment_url' => $s['attachment_url'],
+            'external_link' => $s['external_link'],
+        ]);
 
         redirect('index.php?page=calendar&athlete_id='.$s['athlete_id'].'&month='.substr($date, 0, 7));
     }
@@ -249,10 +248,9 @@ if ($action) {
 
         $s = get_session_checked((int)$_POST['id']);
 
-        db()->prepare('UPDATE sessions SET date=? WHERE id=? AND coach_id=?')->execute([
+        db()->prepare('UPDATE sessions SET date=? WHERE id=?')->execute([
             $_POST['new_date'],
-            $s['id'],
-            $user['id']
+            $s['id']
         ]);
 
         redirect('index.php?page=calendar&athlete_id='.$s['athlete_id'].'&month='.substr($_POST['new_date'], 0, 7));
@@ -606,8 +604,11 @@ if ($page === 'dashboard') {
 
     $q = trim($_GET['q'] ?? '');
 
-    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.coach_id=? AND CONCAT(a.first_name," ",a.last_name," ",a.email) LIKE ? ORDER BY a.created_at DESC');
-    $stmt->execute([$u['id'], '%'.$q.'%']);
+    $coachAthleteWhere = coach_athlete_where('a');
+    $coachAthleteParams = coach_athlete_params((int)$u['id']);
+
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE ' . $coachAthleteWhere . ' AND CONCAT(a.first_name," ",a.last_name," ",a.email) LIKE ? ORDER BY a.created_at DESC');
+    $stmt->execute(array_merge($coachAthleteParams, ['%'.$q.'%']));
     $athletes = $stmt->fetchAll();
 
     [$weekStart, $weekEnd] = week_bounds();
@@ -621,63 +622,64 @@ if ($page === 'dashboard') {
             (table_has_column('sessions', 'duration_min') ? 'duration_min' : 'NULL') . ', 0)), 0)'
         : '0';
 
-    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND ' . $plannedWhere);
-    $stmt->execute([$u['id']]);
+    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND ' . $plannedWhere);
+    $stmt->execute($coachAthleteParams);
     $plannedCount = (int)$stmt->fetchColumn();
 
-    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND ' . $doneWhere);
-    $stmt->execute([$u['id']]);
+    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND ' . $doneWhere);
+    $stmt->execute($coachAthleteParams);
     $doneCount = (int)$stmt->fetchColumn();
 
     $alertParts = [];
     if (table_has_column('sessions', 'feeling')) $alertParts[] = '(feeling IS NOT NULL AND feeling >= 7)';
     if (table_has_column('sessions', 'pain')) $alertParts[] = '(pain IS NOT NULL AND pain >= 7)';
     if ($alertParts) {
-        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE coach_id=? AND (' . implode(' OR ', $alertParts) . ')');
-        $stmt->execute([$u['id']]);
+        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND (' . implode(' OR ', $alertParts) . ')');
+        $stmt->execute($coachAthleteParams);
         $alertCount = (int)$stmt->fetchColumn();
     } else {
         $alertCount = 0;
     }
 
-    $stmt = db()->prepare('SELECT ' . $loadExpr . ' FROM sessions WHERE coach_id=?' . $weekStatusWhere . ' AND date BETWEEN ? AND ?');
-    $stmt->execute([$u['id'], $weekStart, $weekEnd]);
+    $stmt = db()->prepare('SELECT ' . $loadExpr . ' FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . $weekStatusWhere . ' AND date BETWEEN ? AND ?');
+    $stmt->execute(array_merge($coachAthleteParams, [$weekStart, $weekEnd]));
     $weekLoad = (int)$stmt->fetchColumn();
 
-    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.coach_id=? ORDER BY a.first_name, a.last_name');
-    $stmt->execute([$u['id']]);
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE ' . $coachAthleteWhere . ' ORDER BY a.first_name, a.last_name');
+    $stmt->execute($coachAthleteParams);
     $overview = $stmt->fetchAll();
 
     foreach ($overview as &$row) {
-        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND s.coach_id=? AND ' . $plannedWhere . ' ORDER BY s.date LIMIT 1');
-        $stmt->execute([$row['id'], $u['id']]);
+        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND ' . $plannedWhere . ' ORDER BY s.date LIMIT 1');
+        $stmt->execute([$row['id']]);
         $row['next_session'] = $stmt->fetch() ?: null;
         $row['next_date'] = $row['next_session']['date'] ?? null;
 
-        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . $doneWhere);
-        $stmt->execute([$row['id'], $u['id']]);
+        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND ' . $doneWhere);
+        $stmt->execute([$row['id']]);
         $row['last_done_date'] = $stmt->fetchColumn() ?: null;
 
         if (table_has_column('sessions', 'feeling')) {
-            $stmt = db()->prepare('SELECT AVG(feeling) FROM sessions WHERE athlete_id=? AND coach_id=?');
-            $stmt->execute([$row['id'], $u['id']]);
+            $stmt = db()->prepare('SELECT AVG(feeling) FROM sessions WHERE athlete_id=?');
+            $stmt->execute([$row['id']]);
             $row['avg_feeling'] = $stmt->fetchColumn();
         } else {
             $row['avg_feeling'] = null;
         }
 
-        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE athlete_id=? AND coach_id=? AND ' . (table_has_column('sessions', 'status') ? 'status="planned" AND ' : '') . 'date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)');
-        $stmt->execute([$row['id'], $u['id']]);
+        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE athlete_id=? AND ' . (table_has_column('sessions', 'status') ? 'status="planned" AND ' : '') . 'date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)');
+        $stmt->execute([$row['id']]);
         $row['planned_next_week'] = (int)$stmt->fetchColumn();
 
-        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND coach_id=?');
-        $stmt->execute([$row['id'], $u['id']]);
+        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=?');
+        $stmt->execute([$row['id']]);
         $row['last_session_date'] = $stmt->fetchColumn() ?: null;
     }
     unset($row);
 
     $reminders = array_values(array_filter($overview, function ($row) { return (int)$row['planned_next_week'] === 0; }));
     $attentionRows = array_slice($reminders, 0, 4);
+    $availableCoaches = get_available_coaches();
 ?>
 <div class="toolbar">
     <h1>Dashboard coach</h1>
@@ -803,6 +805,20 @@ if ($page === 'dashboard') {
             </div>
 
             <div class="field">
+                <label>Coach secondaire</label>
+                <select name="secondary_coach_id">
+                    <option value="">Aucun</option>
+                    <?php foreach($availableCoaches as $coach): ?>
+                        <?php if((int)$coach['id'] === (int)$u['id']) continue; ?>
+                        <option value="<?=$coach['id']?>"><?=e($coach['name'].' - '.$coach['email'])?></option>
+                    <?php endforeach; ?>
+                </select>
+                <?php if(!athlete_coaches_ready()): ?>
+                    <small>Disponible après passage par la page Migrations.</small>
+                <?php endif; ?>
+            </div>
+
+            <div class="field">
                 <label>Mot de passe temporaire</label>
                 <input name="password" placeholder="Laisser vide pour password123">
             </div>
@@ -835,12 +851,14 @@ if ($page === 'dashboard') {
                     <a class="btn small" href="index.php?page=calendar&athlete_id=<?=$a['id']?>">Calendrier</a>
                     <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$a['id']?>">Modifier</a>
 
-                    <form method="post" onsubmit="return confirm('Supprimer cet athlète ?')">
-                        <input type="hidden" name="csrf" value="<?=csrf_token()?>">
-                        <input type="hidden" name="action" value="delete_athlete">
-                        <input type="hidden" name="id" value="<?=$a['id']?>">
-                        <button class="btn danger small">Supprimer</button>
-                    </form>
+                    <?php if(is_primary_coach_for_athlete((int)$a['id'], (int)$u['id'])): ?>
+                        <form method="post" onsubmit="return confirm('Supprimer cet athlète ?')">
+                            <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+                            <input type="hidden" name="action" value="delete_athlete">
+                            <input type="hidden" name="id" value="<?=$a['id']?>">
+                            <button class="btn danger small">Supprimer</button>
+                        </form>
+                    <?php endif; ?>
                 </td>
             </tr>
         <?php endforeach; ?>
@@ -862,6 +880,15 @@ if ($page === 'edit_athlete') {
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$id]);
     $a = $stmt->fetch();
+    $availableCoaches = get_available_coaches();
+    $assignedCoaches = get_coaches_for_athlete($id);
+    $secondaryCoachId = null;
+    foreach ($assignedCoaches as $coach) {
+        if ((int)$coach['id'] !== (int)$a['coach_id']) {
+            $secondaryCoachId = (int)$coach['id'];
+            break;
+        }
+    }
 
     header_html('Modifier athlète');
 ?>
@@ -913,6 +940,22 @@ if ($page === 'edit_athlete') {
             <textarea name="notes"><?=e($a['notes'])?></textarea>
         </div>
 
+        <div class="field">
+            <label>Coach secondaire</label>
+            <select name="secondary_coach_id">
+                <option value="">Aucun</option>
+                <?php foreach($availableCoaches as $coach): ?>
+                    <?php if((int)$coach['id'] === (int)$a['coach_id']) continue; ?>
+                    <option value="<?=$coach['id']?>" <?=$secondaryCoachId === (int)$coach['id'] ? 'selected' : ''?>>
+                        <?=e($coach['name'].' - '.$coach['email'])?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <?php if(!athlete_coaches_ready()): ?>
+                <small>Disponible après passage par la page Migrations.</small>
+            <?php endif; ?>
+        </div>
+
         <button class="btn">Enregistrer</button>
     </form>
 </section>
@@ -930,8 +973,11 @@ if ($page === 'coach_calendar') {
 
     $selectedAthleteId = (int)($_GET['athlete_id'] ?? 0);
 
-    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.coach_id=? ORDER BY a.first_name, a.last_name');
-    $stmt->execute([$u['id']]);
+    $coachAthleteWhere = coach_athlete_where('a');
+    $coachAthleteParams = coach_athlete_params((int)$u['id']);
+
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE ' . $coachAthleteWhere . ' ORDER BY a.first_name, a.last_name');
+    $stmt->execute($coachAthleteParams);
     $athletes = $stmt->fetchAll();
 
     if ($selectedAthleteId > 0 && !can_access_athlete($selectedAthleteId)) {
@@ -939,20 +985,24 @@ if ($page === 'coach_calendar') {
     }
 
     if ($selectedAthleteId > 0) {
-        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.coach_id=? AND s.athlete_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
-        $stmt->execute([
-            $u['id'],
-            $selectedAthleteId,
-            $start->format('Y-m-d'),
-            $end->format('Y-m-d')
-        ]);
+        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND s.athlete_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
+        $stmt->execute(array_merge(
+            $coachAthleteParams,
+            [
+                $selectedAthleteId,
+                $start->format('Y-m-d'),
+                $end->format('Y-m-d')
+            ]
+        ));
     } else {
-        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE s.coach_id=? AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
-        $stmt->execute([
-            $u['id'],
-            $start->format('Y-m-d'),
-            $end->format('Y-m-d')
-        ]);
+        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ', a.first_name, a.last_name FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND s.date BETWEEN ? AND ? ORDER BY s.date, a.first_name, a.last_name');
+        $stmt->execute(array_merge(
+            $coachAthleteParams,
+            [
+                $start->format('Y-m-d'),
+                $end->format('Y-m-d')
+            ]
+        ));
     }
 
     $sessions = [];
