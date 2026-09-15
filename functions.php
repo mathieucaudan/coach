@@ -58,6 +58,7 @@ function table_has_column(string $table, string $column): bool {
         'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
         'athlete_coaches' => ['athlete_id', 'coach_id', 'created_at'],
         'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
+        'athlete_paces' => ['id', 'athlete_id', 'code', 'label', 'percent_vma', 'sort_order', 'created_at', 'updated_at'],
         'session_debriefs' => ['id', 'session_id', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
         'daily_debriefs' => ['id', 'athlete_id', 'date', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
         'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
@@ -111,6 +112,13 @@ function user_role_needs_migration(): bool {
     }
 }
 
+function add_column_if_missing(string $table, string $column, string $definition, array &$applied): void {
+    if (table_has_column($table, $column)) return;
+
+    db()->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
+    $applied[] = $table . '.' . $column;
+}
+
 function sql_optional(string $table, string $alias, string $column, string $fallback): string {
     return table_has_column($table, $column) ? $alias . '.' . $column : $fallback;
 }
@@ -154,6 +162,9 @@ function session_select_sql(string $alias = 's'): string {
         sql_optional('sessions', $alias, 'intensity', "'moderate'") . ' AS intensity',
         sql_optional('sessions', $alias, 'duration_min', 'NULL') . ' AS duration_min',
         sql_optional('sessions', $alias, 'vma_percent', 'NULL') . ' AS vma_percent',
+        sql_optional('sessions', $alias, 'planned_distance_km', 'NULL') . ' AS planned_distance_km',
+        sql_optional('sessions', $alias, 'actual_distance_km', 'NULL') . ' AS actual_distance_km',
+        sql_optional('sessions', $alias, 'target_pace_code', "''") . ' AS target_pace_code',
         sql_optional('sessions', $alias, 'actual_duration_min', 'NULL') . ' AS actual_duration_min',
         sql_optional('sessions', $alias, 'feeling', 'NULL') . ' AS feeling',
         sql_optional('sessions', $alias, 'pain', 'NULL') . ' AS pain',
@@ -277,6 +288,61 @@ function weather_options(): array {
     ];
 }
 
+function default_pace_presets(): array {
+    return [
+        ['code' => 'VMA105', 'label' => 'VMA 105%', 'percent_vma' => 105],
+        ['code' => 'VMA100', 'label' => 'VMA 100%', 'percent_vma' => 100],
+        ['code' => 'AS3', 'label' => 'AS3', 'percent_vma' => 98.45],
+        ['code' => 'AS5', 'label' => 'AS5', 'percent_vma' => 94],
+        ['code' => 'AS10', 'label' => 'AS10', 'percent_vma' => 93.1],
+        ['code' => 'AS21', 'label' => 'AS21', 'percent_vma' => 88.25],
+        ['code' => 'seuil2', 'label' => 'Seuil 2', 'percent_vma' => 87],
+        ['code' => 'seuil1', 'label' => 'Seuil 1 / EA', 'percent_vma' => 74.2],
+        ['code' => 'EF', 'label' => 'Endurance fondamentale', 'percent_vma' => 70],
+        ['code' => 'recup', 'label' => 'Endurance récupération', 'percent_vma' => 67],
+    ];
+}
+
+function athlete_paces_ready(): bool {
+    return table_exists('athlete_paces');
+}
+
+function get_athlete_paces(int $athleteId): array {
+    if (!athlete_paces_ready()) return default_pace_presets();
+
+    $stmt = db()->prepare('SELECT code, label, percent_vma FROM athlete_paces WHERE athlete_id=? ORDER BY sort_order, id');
+    $stmt->execute([$athleteId]);
+    $paces = $stmt->fetchAll();
+    return $paces ?: default_pace_presets();
+}
+
+function pace_percent_for_athlete(int $athleteId, string $code) {
+    foreach (get_athlete_paces($athleteId) as $pace) {
+        if ($pace['code'] === $code) return (float)$pace['percent_vma'];
+    }
+    return null;
+}
+
+function sync_athlete_paces(int $athleteId, array $paces): void {
+    if (!athlete_paces_ready()) return;
+
+    db()->prepare('DELETE FROM athlete_paces WHERE athlete_id=?')->execute([$athleteId]);
+
+    $insert = db()->prepare(
+        'INSERT INTO athlete_paces (athlete_id, code, label, percent_vma, sort_order, created_at, updated_at)
+         VALUES (?,?,?,?,?,NOW(),NOW())'
+    );
+
+    $order = 0;
+    foreach ($paces as $pace) {
+        $code = trim((string)($pace['code'] ?? ''));
+        $label = trim((string)($pace['label'] ?? ''));
+        $percent = nullable_float($pace['percent_vma'] ?? null);
+        if ($code === '' || $label === '' || $percent === null) continue;
+        $insert->execute([$athleteId, $code, $label, max(40, min(130, $percent)), $order++]);
+    }
+}
+
 function empty_debrief(): array {
     return [
         'id' => null,
@@ -287,6 +353,7 @@ function empty_debrief(): array {
         'weather' => [],
         'temperature_c' => null,
         'lactates' => '',
+        'actual_distance_km' => null,
         'created_at' => null,
         'updated_at' => null,
         'exists' => false,
@@ -309,6 +376,7 @@ function normalize_debrief(array $row): array {
         'weather' => $weather,
         'temperature_c' => $row['temperature_c'] ?? null,
         'lactates' => $row['lactates'] ?? '',
+        'actual_distance_km' => $row['actual_distance_km'] ?? null,
         'created_at' => $row['created_at'] ?? null,
         'updated_at' => $row['updated_at'] ?? null,
         'exists' => true,
@@ -416,27 +484,35 @@ function save_session_debrief(array $session, array $post): void {
         exit('Accès refusé');
     }
 
-    $weather = array_values(array_intersect(array_keys(weather_options()), $post['weather'] ?? []));
-    $difficulty = nullable_int($post['difficulty'] ?? null);
-    if ($difficulty !== null) $difficulty = max(1, min(10, $difficulty));
+    $payload = parse_debrief_payload($post);
 
-    $temperature = $post['temperature_c'] ?? null;
-    $temperature = ($temperature === '' || $temperature === null) ? null : max(-30, min(55, (float)$temperature));
+    $hasDistance = table_has_column('session_debriefs', 'actual_distance_km');
+    $columns = 'session_id,result,difficulty,sensations,weather,temperature_c,lactates';
+    $placeholders = '?,?,?,?,?,?,?';
+    $updates = 'result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
+         weather=VALUES(weather), temperature_c=VALUES(temperature_c), lactates=VALUES(lactates)';
+    $values = [
+        (int)$session['id'],
+        $payload['result'],
+        $payload['difficulty'],
+        $payload['sensations'],
+        $payload['weather'],
+        $payload['temperature_c'],
+        $payload['lactates'],
+    ];
+
+    if ($hasDistance) {
+        $columns .= ',actual_distance_km';
+        $placeholders .= ',?';
+        $updates .= ', actual_distance_km=VALUES(actual_distance_km)';
+        $values[] = $payload['actual_distance_km'];
+    }
 
     db()->prepare(
-        'INSERT INTO session_debriefs (session_id,result,difficulty,sensations,weather,temperature_c,lactates,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,NOW(),NOW())
-         ON DUPLICATE KEY UPDATE result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
-         weather=VALUES(weather), temperature_c=VALUES(temperature_c), lactates=VALUES(lactates), updated_at=NOW()'
-    )->execute([
-        (int)$session['id'],
-        trim((string)($post['result'] ?? '')),
-        $difficulty,
-        trim((string)($post['sensations'] ?? '')),
-        json_encode($weather, JSON_UNESCAPED_UNICODE),
-        $temperature,
-        trim((string)($post['lactates'] ?? '')),
-    ]);
+        'INSERT INTO session_debriefs (' . $columns . ',created_at,updated_at)
+         VALUES (' . $placeholders . ',NOW(),NOW())
+         ON DUPLICATE KEY UPDATE ' . $updates . ', updated_at=NOW()'
+    )->execute($values);
 }
 
 function assert_athlete_owns_athlete_id(int $athleteId): void {
@@ -460,6 +536,7 @@ function parse_debrief_payload(array $post): array {
 
     $temperature = $post['temperature_c'] ?? null;
     $temperature = ($temperature === '' || $temperature === null) ? null : max(-30, min(55, (float)$temperature));
+    $actualDistance = nullable_float($post['actual_distance_km'] ?? null);
 
     return [
         'result' => trim((string)($post['result'] ?? '')),
@@ -468,6 +545,7 @@ function parse_debrief_payload(array $post): array {
         'weather' => json_encode($weather, JSON_UNESCAPED_UNICODE),
         'temperature_c' => $temperature,
         'lactates' => trim((string)($post['lactates'] ?? '')),
+        'actual_distance_km' => $actualDistance === null ? null : max(0, $actualDistance),
     ];
 }
 
@@ -482,12 +560,12 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
     assert_athlete_owns_athlete_id($athleteId);
     $payload = parse_debrief_payload($post);
 
-    db()->prepare(
-        'INSERT INTO daily_debriefs (athlete_id,date,result,difficulty,sensations,weather,temperature_c,lactates,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())
-         ON DUPLICATE KEY UPDATE result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
-         weather=VALUES(weather), temperature_c=VALUES(temperature_c), lactates=VALUES(lactates), updated_at=NOW()'
-    )->execute([
+    $hasDistance = table_has_column('daily_debriefs', 'actual_distance_km');
+    $columns = 'athlete_id,date,result,difficulty,sensations,weather,temperature_c,lactates';
+    $placeholders = '?,?,?,?,?,?,?,?';
+    $updates = 'result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
+         weather=VALUES(weather), temperature_c=VALUES(temperature_c), lactates=VALUES(lactates)';
+    $values = [
         $athleteId,
         $date,
         $payload['result'],
@@ -496,7 +574,20 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
         $payload['weather'],
         $payload['temperature_c'],
         $payload['lactates'],
-    ]);
+    ];
+
+    if ($hasDistance) {
+        $columns .= ',actual_distance_km';
+        $placeholders .= ',?';
+        $updates .= ', actual_distance_km=VALUES(actual_distance_km)';
+        $values[] = $payload['actual_distance_km'];
+    }
+
+    db()->prepare(
+        'INSERT INTO daily_debriefs (' . $columns . ',created_at,updated_at)
+         VALUES (' . $placeholders . ',NOW(),NOW())
+         ON DUPLICATE KEY UPDATE ' . $updates . ', updated_at=NOW()'
+    )->execute($values);
 }
 
 function create_quick_session(int $athleteId, string $date, string $title, string $description): int {
@@ -569,6 +660,39 @@ function run_pending_migrations(): array {
         $applied[] = 'super_admin_config';
     }
 
+    if (table_exists('sessions')) {
+        add_column_if_missing('sessions', 'planned_distance_km', 'DECIMAL(6,2) NULL AFTER duration_min', $applied);
+        add_column_if_missing('sessions', 'actual_distance_km', 'DECIMAL(6,2) NULL AFTER actual_duration_min', $applied);
+        add_column_if_missing('sessions', 'target_pace_code', 'VARCHAR(40) NULL AFTER vma_percent', $applied);
+    }
+    if (table_exists('session_debriefs')) {
+        add_column_if_missing('session_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL AFTER lactates', $applied);
+    }
+    if (table_exists('daily_debriefs')) {
+        add_column_if_missing('daily_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL AFTER lactates', $applied);
+    }
+
+    if (!table_exists('athlete_paces')) {
+        db()->exec(
+            'CREATE TABLE athlete_paces (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                athlete_id INT NOT NULL,
+                code VARCHAR(40) NOT NULL,
+                label VARCHAR(120) NOT NULL,
+                percent_vma DECIMAL(5,2) NOT NULL,
+                sort_order INT NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_athlete_paces_code (athlete_id, code),
+                CONSTRAINT fk_athlete_paces_athlete
+                    FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        $applied[] = 'athlete_paces';
+    }
+
     if (!table_exists('athlete_coaches')) {
         db()->exec(
             'CREATE TABLE athlete_coaches (
@@ -602,6 +726,7 @@ function run_pending_migrations(): array {
                 weather JSON NULL,
                 temperature_c DECIMAL(4,1) NULL,
                 lactates TEXT NULL,
+                actual_distance_km DECIMAL(6,2) NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
@@ -627,6 +752,7 @@ function run_pending_migrations(): array {
                 weather JSON NULL,
                 temperature_c DECIMAL(4,1) NULL,
                 lactates TEXT NULL,
+                actual_distance_km DECIMAL(6,2) NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
@@ -880,10 +1006,43 @@ function pace_from_vma(float $vma, float $percent) {
     return 60 / ($vma * $percent / 100);
 }
 
+function speed_from_vma(float $vma, float $percent) {
+    if ($vma <= 0 || $percent <= 0) return null;
+    return $vma * $percent / 100;
+}
+
+function format_speed($speed): string {
+    if (!$speed || $speed <= 0) return '-';
+    return rtrim(rtrim(number_format((float)$speed, 2, ',', ' '), '0'), ',') . ' km/h';
+}
+
 function format_pace($minutesPerKm): string {
     if (!$minutesPerKm || $minutesPerKm <= 0) return '-';
     $seconds = (int)round($minutesPerKm * 60);
     return floor($seconds / 60) . "'" . str_pad((string)($seconds % 60), 2, '0', STR_PAD_LEFT) . '/km';
+}
+
+function format_distance($distance): string {
+    if ($distance === null || $distance === '') return '-';
+    return rtrim(rtrim(number_format((float)$distance, 2, ',', ' '), '0'), ',') . ' km';
+}
+
+function pace_label_from_code(array $paces, ?string $code): string {
+    if (!$code) return '-';
+    foreach ($paces as $pace) {
+        if ($pace['code'] === $code) return $pace['label'];
+    }
+    return $code;
+}
+
+function session_volume_label(array $session): string {
+    if (($session['planned_distance_km'] ?? null) !== null && $session['planned_distance_km'] !== '') {
+        return format_distance($session['planned_distance_km']);
+    }
+    if (!empty($session['duration_min'])) {
+        return (int)$session['duration_min'] . ' min';
+    }
+    return '';
 }
 
 function format_split($minutesPerKm, float $distanceKm): string {

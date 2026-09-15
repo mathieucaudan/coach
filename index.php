@@ -111,6 +111,7 @@ if ($action) {
             'notes' => trim($_POST['notes'] ?? '')
         ]);
         sync_athlete_coaches($athleteId, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
+        sync_athlete_paces($athleteId, $_POST['paces'] ?? []);
 
         db()->commit();
 
@@ -149,6 +150,7 @@ if ($action) {
             'notes' => trim($_POST['notes'] ?? '')
         ], 'id=?', [$id]);
         sync_athlete_coaches($id, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
+        sync_athlete_paces($id, $_POST['paces'] ?? []);
 
         $stmt = db()->prepare('UPDATE users u JOIN athletes a ON a.user_id=u.id SET u.name=?, u.email=? WHERE a.id=?');
         $stmt->execute([
@@ -188,6 +190,15 @@ if ($action) {
         if (!can_access_athlete($athleteId)) exit('Accès refusé');
 
         $attachment = upload_attachment();
+        $targetPaceCode = trim((string)($_POST['target_pace_code'] ?? ''));
+        $targetPacePercent = $targetPaceCode !== '' ? pace_percent_for_athlete($athleteId, $targetPaceCode) : nullable_float($_POST['vma_percent'] ?? null);
+        if ($targetPaceCode !== '' && $targetPacePercent === null) {
+            $targetPaceCode = '';
+        }
+        $plannedDistance = nullable_float($_POST['planned_distance_km'] ?? null);
+        $actualDistance = nullable_float($_POST['actual_distance_km'] ?? null);
+        $plannedDistance = $plannedDistance === null ? null : max(0, $plannedDistance);
+        $actualDistance = $actualDistance === null ? null : max(0, $actualDistance);
 
         if (!empty($_POST['id'])) {
             $session = get_session_checked((int)$_POST['id']);
@@ -200,7 +211,10 @@ if ($action) {
                 'status' => $_POST['status'] ?? 'planned',
                 'intensity' => $_POST['intensity'] ?? 'moderate',
                 'duration_min' => nullable_int($_POST['duration_min'] ?? null),
-                'vma_percent' => nullable_float($_POST['vma_percent'] ?? null),
+                'planned_distance_km' => $plannedDistance,
+                'actual_distance_km' => $actualDistance,
+                'target_pace_code' => $targetPaceCode ?: null,
+                'vma_percent' => $targetPacePercent,
                 'description' => $_POST['description'],
                 'objective' => '',
                 'warmup' => $_POST['warmup'],
@@ -224,7 +238,10 @@ if ($action) {
                 'status' => $_POST['status'] ?? 'planned',
                 'intensity' => $_POST['intensity'] ?? 'moderate',
                 'duration_min' => nullable_int($_POST['duration_min'] ?? null),
-                'vma_percent' => nullable_float($_POST['vma_percent'] ?? null),
+                'planned_distance_km' => $plannedDistance,
+                'actual_distance_km' => $actualDistance,
+                'target_pace_code' => $targetPaceCode ?: null,
+                'vma_percent' => $targetPacePercent,
                 'description' => $_POST['description'],
                 'objective' => '',
                 'warmup' => $_POST['warmup'],
@@ -268,6 +285,9 @@ if ($action) {
             'status' => $s['status'],
             'intensity' => $s['intensity'],
             'duration_min' => $s['duration_min'],
+            'planned_distance_km' => $s['planned_distance_km'],
+            'actual_distance_km' => $s['actual_distance_km'],
+            'target_pace_code' => $s['target_pace_code'],
             'vma_percent' => $s['vma_percent'],
             'description' => $s['description'],
             'objective' => $s['objective'],
@@ -394,6 +414,11 @@ function debrief_form_fields(array $debrief): void {
         <textarea id="debrief-result" name="result" placeholder="Ex : 10 km en 42'15, footing 1h15 - 14,2 km"><?=e($debrief['result'])?></textarea>
     </div>
 
+    <div class="field">
+        <label for="debrief-distance">Volume réalisé (km)</label>
+        <input id="debrief-distance" type="number" name="actual_distance_km" min="0" step="0.01" value="<?=e($debrief['actual_distance_km'] ?? '')?>">
+    </div>
+
     <fieldset class="difficulty-field">
         <legend>Difficulté</legend>
         <div class="difficulty-scale" role="radiogroup" aria-label="Difficulté de 1 à 10">
@@ -435,6 +460,32 @@ function debrief_form_fields(array $debrief): void {
             <label for="debrief-lactates">Lactates</label>
             <input id="debrief-lactates" name="lactates" value="<?=e($debrief['lactates'])?>" placeholder="Ex : 2.1 mmol/L ou Non mesuré">
         </div>
+    </div>
+<?php
+}
+
+function athlete_pace_fields(array $paces): void {
+?>
+    <div class="field full">
+        <label>Repères d'allure</label>
+        <div class="pace-editor">
+            <?php foreach($paces as $i => $pace): ?>
+                <div class="pace-edit-row">
+                    <input type="hidden" name="paces[<?=$i?>][code]" value="<?=e($pace['code'])?>">
+                    <div>
+                        <label for="pace-label-<?=$i?>">Repère</label>
+                        <input id="pace-label-<?=$i?>" name="paces[<?=$i?>][label]" value="<?=e($pace['label'])?>">
+                    </div>
+                    <div>
+                        <label for="pace-percent-<?=$i?>">% VMA</label>
+                        <input id="pace-percent-<?=$i?>" type="number" name="paces[<?=$i?>][percent_vma]" min="40" max="130" step="0.1" value="<?=e($pace['percent_vma'])?>">
+                    </div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+        <?php if(!athlete_paces_ready()): ?>
+            <small>Personnalisation disponible après passage par la page Migrations.</small>
+        <?php endif; ?>
     </div>
 <?php
 }
@@ -625,6 +676,7 @@ if ($page === 'daily_debrief') {
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$athleteId]);
     $a = $stmt->fetch();
+    $athletePaces = get_athlete_paces($athleteId);
 
     $stmt = db()->prepare('SELECT id FROM sessions WHERE athlete_id=? AND date=? ORDER BY id LIMIT 1');
     $stmt->execute([$athleteId, $date]);
@@ -654,6 +706,7 @@ if ($page === 'daily_debrief') {
     <?php if($debrief['exists']): ?>
         <div class="debrief-summary">
             <div class="metric-box"><strong><?=e($debrief['difficulty'] ?: '-')?>/10</strong><span>Difficulté</span></div>
+            <div class="metric-box"><strong><?=e(format_distance($debrief['actual_distance_km']))?></strong><span>Volume réalisé</span></div>
             <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
             <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
         </div>
@@ -752,11 +805,16 @@ if ($page === 'dashboard') {
     $plannedWhere = table_has_column('sessions', 'status') ? 'status="planned" AND date >= CURDATE()' : 'date >= CURDATE()';
     $doneWhere = table_has_column('sessions', 'status') ? 'status="done"' : 'date < CURDATE()';
     $weekStatusWhere = table_has_column('sessions', 'status') ? ' AND status <> "cancelled"' : '';
-    $loadExpr = table_has_column('sessions', 'actual_duration_min') || table_has_column('sessions', 'duration_min')
+    $usesDistanceLoad = table_has_column('sessions', 'actual_distance_km') || table_has_column('sessions', 'planned_distance_km');
+    $loadExpr = $usesDistanceLoad
+        ? 'COALESCE(SUM(COALESCE(' .
+            (table_has_column('sessions', 'actual_distance_km') ? 'actual_distance_km' : 'NULL') . ', ' .
+            (table_has_column('sessions', 'planned_distance_km') ? 'planned_distance_km' : 'NULL') . ', 0)), 0)'
+        : (table_has_column('sessions', 'actual_duration_min') || table_has_column('sessions', 'duration_min')
         ? 'COALESCE(SUM(COALESCE(' .
             (table_has_column('sessions', 'actual_duration_min') ? 'actual_duration_min' : 'NULL') . ', ' .
             (table_has_column('sessions', 'duration_min') ? 'duration_min' : 'NULL') . ', 0)), 0)'
-        : '0';
+        : '0');
 
     $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND ' . $plannedWhere);
     $stmt->execute($coachAthleteParams);
@@ -779,7 +837,8 @@ if ($page === 'dashboard') {
 
     $stmt = db()->prepare('SELECT ' . $loadExpr . ' FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . $weekStatusWhere . ' AND date BETWEEN ? AND ?');
     $stmt->execute(array_merge($coachAthleteParams, [$weekStart, $weekEnd]));
-    $weekLoad = (int)$stmt->fetchColumn();
+    $weekLoad = (float)$stmt->fetchColumn();
+    $weekLoadLabel = $usesDistanceLoad ? format_distance($weekLoad) : ((int)$weekLoad . ' min');
 
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE ' . $coachAthleteWhere . ' ORDER BY a.first_name, a.last_name');
     $stmt->execute($coachAthleteParams);
@@ -816,6 +875,7 @@ if ($page === 'dashboard') {
     $reminders = array_values(array_filter($overview, function ($row) { return (int)$row['planned_next_week'] === 0; }));
     $attentionRows = array_slice($reminders, 0, 4);
     $availableCoaches = get_available_coaches();
+    $defaultPaces = default_pace_presets();
 ?>
 <div class="toolbar">
     <h1>Dashboard coach</h1>
@@ -834,7 +894,7 @@ if ($page === 'dashboard') {
     <section class="stat-card"><strong><?=count($athletes)?></strong><span>Athletes</span></section>
     <section class="stat-card"><strong><?=$plannedCount?></strong><span>Seances a venir</span></section>
     <section class="stat-card"><strong><?=$doneCount?></strong><span>Seances realisees</span></section>
-    <section class="stat-card"><strong><?=$weekLoad?> min</strong><span>Charge semaine</span></section>
+    <section class="stat-card"><strong><?=e($weekLoadLabel)?></strong><span>Charge semaine</span></section>
     <section class="stat-card warning"><strong><?=count($reminders)?></strong><span>Rappels planning</span></section>
     <section class="stat-card danger"><strong><?=$alertCount?></strong><span>Alertes fatigue</span></section>
 </div>
@@ -935,6 +995,8 @@ if ($page === 'dashboard') {
                 <input type="number" name="vma" min="5" max="30" step="0.1" value="15" required>
             </div>
 
+            <?php athlete_pace_fields($defaultPaces); ?>
+
             <div class="field">
                 <label>Notes</label>
                 <textarea name="notes" placeholder="Contraintes, blessures, disponibilites..."></textarea>
@@ -1029,6 +1091,7 @@ if ($page === 'edit_athlete') {
     $stmt->execute([$id]);
     $a = $stmt->fetch();
     $availableCoaches = get_available_coaches();
+    $athletePaces = get_athlete_paces($id);
     $assignedCoaches = get_coaches_for_athlete($id);
     $secondaryCoachId = null;
     foreach ($assignedCoaches as $coach) {
@@ -1082,6 +1145,8 @@ if ($page === 'edit_athlete') {
             <label>VMA (km/h)</label>
             <input type="number" name="vma" min="5" max="30" step="0.1" value="<?=e($a['vma'])?>" required>
         </div>
+
+        <?php athlete_pace_fields($athletePaces); ?>
 
         <div class="field">
             <label>Notes</label>
@@ -1251,7 +1316,7 @@ if ($page === 'coach_calendar') {
                 <a class="session-pill <?=type_class($s['type'])?>" href="index.php?page=session&id=<?=$s['id']?>" title="<?=e($s['first_name'].' '.$s['last_name'].' — '.$s['title'])?>">
                     <span class="session-athlete"><?=e($s['first_name'])?></span>
                     <span class="session-title"><?=e($s['title'])?></span>
-                    <span class="session-meta"><?=e($s['type'])?><?=!empty($s['duration_min']) ? ' · '.e($s['duration_min']).' min' : ''?></span>
+                    <span class="session-meta"><?=e($s['type'])?><?=session_volume_label($s) ? ' · '.e(session_volume_label($s)) : ''?></span>
                     <span class="debrief-dot debrief-<?=$debriefStatus?>" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
                 </a>
             <?php endforeach; ?>
@@ -1312,7 +1377,7 @@ if ($page === 'calendar') {
             $weekSessionCount++;
         }
 
-        $displayLoad += (int)($s['actual_duration_min'] ?: ($s['duration_min'] ?: 0));
+        $displayLoad += (float)($s['actual_distance_km'] ?: ($s['planned_distance_km'] ?: 0));
     }
     $dailyDebriefs = attach_daily_debriefs_to_calendar($sessions, $athleteId, $start, $end);
 
@@ -1351,13 +1416,18 @@ if ($page === 'calendar') {
     </div>
     <div class="mini-metrics">
         <div><strong><?=$weekSessionCount?></strong><span>Cette semaine</span></div>
-        <div><strong><?=$displayLoad?> min</strong><span>Charge affichee</span></div>
+        <div><strong><?=e(format_distance($displayLoad))?></strong><span>Volume affiché</span></div>
         <div><strong><?=e($lastSession ? format_short_date($lastSession['date']) : '-')?></strong><span>Derniere</span></div>
     </div>
 </section>
 
 <section class="card athlete-summary">
-    <h2>Profil athlete</h2>
+    <div class="section-head">
+        <h2>Profil athlete</h2>
+        <?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
+            <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$athleteId?>">Modifier le profil</a>
+        <?php endif; ?>
+    </div>
     <div class="metrics-row">
         <div class="metric-box"><strong><?=e($a['sport'])?></strong><span>Sport</span></div>
         <div class="metric-box"><strong><?=e($a['level'])?></strong><span>Niveau</span></div>
@@ -1370,15 +1440,17 @@ if ($page === 'calendar') {
 </section>
 
 <section class="card">
-    <h2>Allures VMA</h2>
+    <h2>Repères d'allure</h2>
     <div class="pace-grid">
-        <?php foreach([60,70,80,90,100,105] as $percent):
+        <?php foreach($athletePaces as $pacePreset):
+            $percent = (float)$pacePreset['percent_vma'];
             $pace = pace_from_vma((float)$a['vma'], $percent);
+            $speed = speed_from_vma((float)$a['vma'], $percent);
         ?>
             <div class="pace-cell">
-                <strong><?=$percent?>%</strong>
-                <span><?=e(format_pace($pace))?></span>
-                <small>400m <?=e(format_split($pace, 0.4))?> · 1000m <?=e(format_split($pace, 1))?></small>
+                <strong><?=e($pacePreset['label'])?></strong>
+                <span><?=e(format_speed($speed))?> · <?=e(format_pace($pace))?></span>
+                <small><?=e(rtrim(rtrim(number_format($percent, 2, ',', ' '), '0'), ','))?>% VMA · 400m <?=e(format_split($pace, 0.4))?> · 1000m <?=e(format_split($pace, 1))?></small>
             </div>
         <?php endforeach; ?>
     </div>
@@ -1425,7 +1497,7 @@ if ($page === 'calendar') {
             ?>
                 <a class="session-pill <?=type_class($s['type'])?> debrief-<?=$debriefStatus?>" href="index.php?page=session&id=<?=$s['id']?>" aria-label="<?=e($s['title'].' - '.debrief_status_label($debriefStatus))?>">
                     <span class="session-title"><?=e($s['title'])?></span>
-                    <span class="session-meta"><?=e($s['type'])?><?=!empty($s['duration_min']) ? ' · '.e($s['duration_min']).' min' : ''?></span>
+                    <span class="session-meta"><?=e($s['type'])?><?=session_volume_label($s) ? ' · '.e(session_volume_label($s)) : ''?></span>
                     <span class="debrief-dot debrief-<?=$debriefStatus?>" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
                 </a>
             <?php endforeach; ?>
@@ -1447,7 +1519,7 @@ if ($page === 'calendar') {
             <a class="agenda-row" href="index.php?page=session&id=<?=$s['id']?>">
                 <div>
                     <strong><?=e($s['title'])?></strong>
-                    <span><?=e(format_full_date($s['date']))?> - <?=e($s['type'])?></span>
+                    <span><?=e(format_full_date($s['date']))?> - <?=e($s['type'])?><?=session_volume_label($s) ? ' - '.e(session_volume_label($s)) : ''?></span>
                 </div>
                 <span>
                     <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
@@ -1474,6 +1546,7 @@ if ($page === 'edit_session') {
     }
 
     if (!can_access_athlete($athleteId)) exit('Accès refusé');
+    $athletePaces = get_athlete_paces($athleteId);
 
     header_html($session ? 'Modifier séance' : 'Créer séance');
 ?>
@@ -1534,43 +1607,30 @@ if ($page === 'edit_session') {
             </div>
 
             <div class="field">
-                <label>Duree prevue (min)</label>
-                <input type="number" name="duration_min" min="1" step="5" value="<?=e($session['duration_min'] ?? '')?>">
+                <label>Volume total prévu (km)</label>
+                <input type="number" name="planned_distance_km" min="0" step="0.01" value="<?=e($session['planned_distance_km'] ?? '')?>">
             </div>
 
             <div class="field">
-                <label>% VMA cible</label>
-                <input type="number" name="vma_percent" min="40" max="130" step="1" value="<?=e($session['vma_percent'] ?? '')?>">
+                <label>Rythme visé</label>
+                <select name="target_pace_code">
+                    <option value="">Non précisé</option>
+                    <?php foreach($athletePaces as $pacePreset): ?>
+                        <option value="<?=e($pacePreset['code'])?>" <?=($session['target_pace_code'] ?? '') === $pacePreset['code'] ? 'selected' : ''?>>
+                            <?=e($pacePreset['label'])?> · <?=e(rtrim(rtrim(number_format((float)$pacePreset['percent_vma'], 1, ',', ' '), '0'), ','))?>% VMA
+                        </option>
+                    <?php endforeach; ?>
+                </select>
             </div>
 
             <div class="field">
-                <label>Lien optionnel</label>
-                <input name="external_link" value="<?=e($session['external_link'] ?? '')?>">
+                <label>Volume réalisé (km)</label>
+                <input type="number" name="actual_distance_km" min="0" step="0.01" value="<?=e($session['actual_distance_km'] ?? '')?>">
             </div>
 
             <div class="field full">
-                <label>Description</label>
+                <label>Contenu de séance</label>
                 <textarea name="description"><?=e($session['description'] ?? '')?></textarea>
-            </div>
-
-            <div class="field">
-                <label>Échauffement</label>
-                <textarea name="warmup"><?=e($session['warmup'] ?? '')?></textarea>
-            </div>
-
-            <div class="field">
-                <label>Corps de séance</label>
-                <textarea name="main_workout"><?=e($session['main_workout'] ?? '')?></textarea>
-            </div>
-
-            <div class="field full">
-                <label>Conseils du coach</label>
-                <textarea name="coach_notes"><?=e($session['coach_notes'] ?? '')?></textarea>
-            </div>
-
-            <div class="field">
-                <label>Duree reelle (min)</label>
-                <input type="number" name="actual_duration_min" min="1" step="5" value="<?=e($session['actual_duration_min'] ?? '')?>">
             </div>
 
             <div class="field">
@@ -1588,6 +1648,46 @@ if ($page === 'edit_session') {
                 <textarea name="athlete_feedback"><?=e($session['athlete_feedback'] ?? '')?></textarea>
             </div>
 
+            <details class="advanced-fields full">
+                <summary>Options avancées</summary>
+                <div class="form-grid">
+                    <div class="field">
+                        <label>Durée prévue (min)</label>
+                        <input type="number" name="duration_min" min="1" step="5" value="<?=e($session['duration_min'] ?? '')?>">
+                    </div>
+
+                    <div class="field">
+                        <label>Durée réelle (min)</label>
+                        <input type="number" name="actual_duration_min" min="1" step="5" value="<?=e($session['actual_duration_min'] ?? '')?>">
+                    </div>
+
+                    <div class="field">
+                        <label>% VMA cible</label>
+                        <input type="number" name="vma_percent" min="40" max="130" step="0.1" value="<?=e($session['vma_percent'] ?? '')?>">
+                    </div>
+
+                    <div class="field">
+                        <label>Lien optionnel</label>
+                        <input name="external_link" value="<?=e($session['external_link'] ?? '')?>">
+                    </div>
+
+                    <div class="field">
+                        <label>Échauffement</label>
+                        <textarea name="warmup"><?=e($session['warmup'] ?? '')?></textarea>
+                    </div>
+
+                    <div class="field">
+                        <label>Corps de séance</label>
+                        <textarea name="main_workout"><?=e($session['main_workout'] ?? '')?></textarea>
+                    </div>
+
+                    <div class="field full">
+                        <label>Conseils du coach</label>
+                        <textarea name="coach_notes"><?=e($session['coach_notes'] ?? '')?></textarea>
+                    </div>
+                </div>
+            </details>
+
             <div class="field full">
                 <label>Pièce jointe</label>
                 <input type="file" name="attachment">
@@ -1604,6 +1704,7 @@ if ($page === 'edit_session') {
 
 if ($page === 'session') {
     $s = get_session_checked((int)$_GET['id']);
+    $sessionPaces = get_athlete_paces((int)$s['athlete_id']);
     $pace = !empty($s['vma_percent']) ? pace_from_vma((float)$s['vma'], (float)$s['vma_percent']) : null;
 
     $stmt = db()->prepare('SELECT c.*, u.name FROM comments c JOIN users u ON u.id=c.user_id WHERE c.session_id=? ORDER BY c.created_at');
@@ -1652,10 +1753,11 @@ if ($page === 'session') {
     <div class="detail-list">
         <div class="metrics-row">
             <div class="metric-box"><strong><?=e(intensity_label($s['intensity']))?></strong><span>Intensite</span></div>
-            <div class="metric-box"><strong><?=e($s['duration_min'] ?: '-')?> min</strong><span>Prevu</span></div>
-            <div class="metric-box"><strong><?=e($s['actual_duration_min'] ?: '-')?> min</strong><span>Reel</span></div>
-            <div class="metric-box"><strong><?=e($s['vma_percent'] ?: '-')?>%</strong><span>VMA</span></div>
+            <div class="metric-box"><strong><?=e(format_distance($s['planned_distance_km']))?></strong><span>Volume prévu</span></div>
+            <div class="metric-box"><strong><?=e(format_distance($s['actual_distance_km']))?></strong><span>Volume réel</span></div>
+            <div class="metric-box"><strong><?=e(pace_label_from_code($sessionPaces, $s['target_pace_code']))?></strong><span>Rythme visé</span></div>
             <div class="metric-box"><strong><?=e(format_pace($pace))?></strong><span>Allure</span></div>
+            <div class="metric-box"><strong><?=e($s['duration_min'] ?: '-')?> min</strong><span>Durée prévue</span></div>
             <div class="metric-box"><strong><?=e($s['feeling'] ?: '-')?>/10</strong><span>Ressenti</span></div>
             <div class="metric-box"><strong><?=e($s['pain'] ?? '-')?>/10</strong><span>Douleur</span></div>
         </div>
@@ -1703,6 +1805,7 @@ if ($page === 'session') {
     <?php if($debrief['exists']): ?>
         <div class="debrief-summary">
             <div class="metric-box"><strong><?=e($debrief['difficulty'] ?: '-')?>/10</strong><span>Difficulté</span></div>
+            <div class="metric-box"><strong><?=e(format_distance($debrief['actual_distance_km']))?></strong><span>Volume réalisé</span></div>
             <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
             <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
         </div>
@@ -1729,54 +1832,7 @@ if ($page === 'session') {
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="save_debrief">
             <input type="hidden" name="session_id" value="<?=$s['id']?>">
-
-            <div class="field full">
-                <label for="debrief-result">Chronos / résultat de la séance</label>
-                <textarea id="debrief-result" name="result" placeholder="Ex : 6 × 1000 m : 3'42 / 3'40 / 3'41"><?=e($debrief['result'])?></textarea>
-            </div>
-
-            <fieldset class="difficulty-field">
-                <legend>Difficulté</legend>
-                <div class="difficulty-scale" role="radiogroup" aria-label="Difficulté de 1 à 10">
-                    <?php for($i = 1; $i <= 10; $i++): ?>
-                        <label class="difficulty-choice <?=$debrief['difficulty'] === $i ? 'selected' : ''?>">
-                            <input type="radio" name="difficulty" value="<?=$i?>" <?=$debrief['difficulty'] === $i ? 'checked' : ''?>>
-                            <span><?=$i?></span>
-                        </label>
-                    <?php endfor; ?>
-                </div>
-                <p class="scale-help">1 très facile · 5 moyen · 10 très difficile</p>
-            </fieldset>
-
-            <div class="field full">
-                <label for="debrief-sensations">Sensations / commentaires / douleurs / gênes</label>
-                <textarea id="debrief-sensations" name="sensations" class="large-textarea" placeholder="Fatigue, douleurs, contexte, bonnes sensations, informations utiles au coach..."><?=e($debrief['sensations'])?></textarea>
-            </div>
-
-            <fieldset class="weather-field">
-                <legend>Météo</legend>
-                <div class="weather-options">
-                    <?php foreach(weather_options() as $key => $weather): ?>
-                        <label class="weather-choice <?=in_array($key, $debrief['weather'], true) ? 'selected' : ''?>">
-                            <input type="checkbox" name="weather[]" value="<?=$key?>" <?=in_array($key, $debrief['weather'], true) ? 'checked' : ''?>>
-                            <span aria-hidden="true"><?=e($weather['icon'])?></span>
-                            <strong><?=e($weather['label'])?></strong>
-                        </label>
-                    <?php endforeach; ?>
-                </div>
-            </fieldset>
-
-            <div class="form-grid">
-                <div class="field">
-                    <label for="debrief-temperature">Température (°C)</label>
-                    <input id="debrief-temperature" type="number" name="temperature_c" min="-30" max="55" step="0.5" value="<?=e($debrief['temperature_c'] ?? '')?>">
-                </div>
-
-                <div class="field">
-                    <label for="debrief-lactates">Lactates</label>
-                    <input id="debrief-lactates" name="lactates" value="<?=e($debrief['lactates'])?>" placeholder="Ex : 2.1 mmol/L ou Non mesuré">
-                </div>
-            </div>
+            <?php debrief_form_fields($debrief); ?>
 
             <button class="btn" type="submit">Enregistrer le débrief</button>
         </form>
