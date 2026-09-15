@@ -75,6 +75,15 @@ if ($action) {
         redirect('index.php?page=admin');
     }
 
+    if ($action === 'save_coach_settings') {
+        require_role('coach');
+
+        save_coach_session_field_visibility((int)$user['id'], $_POST['session_fields'] ?? []);
+        $_SESSION['success'] = 'Paramètres enregistrés.';
+
+        redirect('index.php?page=coach_settings');
+    }
+
     if ($action === 'create_athlete') {
         require_role('coach');
 
@@ -112,6 +121,7 @@ if ($action) {
         ]);
         sync_athlete_coaches($athleteId, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
         sync_athlete_paces($athleteId, $_POST['paces'] ?? []);
+        ensure_athlete_paces($athleteId);
 
         db()->commit();
 
@@ -151,6 +161,7 @@ if ($action) {
         ], 'id=?', [$id]);
         sync_athlete_coaches($id, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
         sync_athlete_paces($id, $_POST['paces'] ?? []);
+        ensure_athlete_paces($id);
 
         $stmt = db()->prepare('UPDATE users u JOIN athletes a ON a.user_id=u.id SET u.name=?, u.email=? WHERE a.id=?');
         $stmt->execute([
@@ -217,16 +228,16 @@ if ($action) {
                 'vma_percent' => $targetPacePercent,
                 'description' => $_POST['description'],
                 'objective' => '',
-                'warmup' => $_POST['warmup'],
-                'main_workout' => $_POST['main_workout'],
+                'warmup' => $_POST['warmup'] ?? '',
+                'main_workout' => $_POST['main_workout'] ?? '',
                 'cooldown' => '',
-                'coach_notes' => $_POST['coach_notes'],
+                'coach_notes' => $_POST['coach_notes'] ?? '',
                 'actual_duration_min' => nullable_int($_POST['actual_duration_min'] ?? null),
                 'feeling' => nullable_int($_POST['feeling'] ?? null),
                 'pain' => nullable_int($_POST['pain'] ?? null),
                 'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
                 'attachment_url' => $attachment,
-                'external_link' => $_POST['external_link'] ?: null
+                'external_link' => ($_POST['external_link'] ?? '') ?: null
             ], 'id=?', [(int)$_POST['id']]);
         } else {
             db_insert('sessions', [
@@ -244,16 +255,16 @@ if ($action) {
                 'vma_percent' => $targetPacePercent,
                 'description' => $_POST['description'],
                 'objective' => '',
-                'warmup' => $_POST['warmup'],
-                'main_workout' => $_POST['main_workout'],
+                'warmup' => $_POST['warmup'] ?? '',
+                'main_workout' => $_POST['main_workout'] ?? '',
                 'cooldown' => '',
-                'coach_notes' => $_POST['coach_notes'],
+                'coach_notes' => $_POST['coach_notes'] ?? '',
                 'actual_duration_min' => nullable_int($_POST['actual_duration_min'] ?? null),
                 'feeling' => nullable_int($_POST['feeling'] ?? null),
                 'pain' => nullable_int($_POST['pain'] ?? null),
                 'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
                 'attachment_url' => $attachment,
-                'external_link' => $_POST['external_link'] ?: null
+                'external_link' => ($_POST['external_link'] ?? '') ?: null
             ]);
         }
 
@@ -386,6 +397,7 @@ function header_html(string $title) {
             <?php endif; ?>
             <a href="index.php?page=dashboard">Athlètes</a>
             <a href="index.php?page=coach_calendar">Calendrier général</a>
+            <a href="index.php?page=coach_settings">Paramètres</a>
         <?php else: ?>
             <a href="index.php">Calendrier</a>
         <?php endif; ?>
@@ -490,6 +502,125 @@ function athlete_pace_fields(array $paces): void {
 <?php
 }
 
+function session_form_field(string $fieldKey, array $session, array $athletePaces): void {
+    if ($fieldKey === 'type'): ?>
+        <div class="field">
+            <label>Type</label>
+            <select name="type">
+                <?php foreach(session_types() as $t): ?>
+                    <option <?=$t === ($session['type'] ?? 'footing') ? 'selected' : ''?>>
+                        <?=e($t)?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+    <?php elseif ($fieldKey === 'status'): ?>
+        <div class="field">
+            <label>Statut</label>
+            <select name="status">
+                <?php foreach(session_statuses() as $value => $label): ?>
+                    <option value="<?=$value?>" <?=$value === ($session['status'] ?? 'planned') ? 'selected' : ''?>>
+                        <?=e($label)?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+    <?php elseif ($fieldKey === 'intensity'): ?>
+        <div class="field">
+            <label>Intensité</label>
+            <select name="intensity">
+                <?php foreach(intensities() as $value => $label): ?>
+                    <option value="<?=$value?>" <?=$value === ($session['intensity'] ?? 'moderate') ? 'selected' : ''?>>
+                        <?=e($label)?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+    <?php elseif ($fieldKey === 'planned_distance_km'): ?>
+        <div class="field">
+            <label>Volume total prévu (km)</label>
+            <input type="number" name="planned_distance_km" min="0" step="0.01" value="<?=e($session['planned_distance_km'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'target_pace_code'): ?>
+        <div class="field">
+            <label>Seuil / rythme visé</label>
+            <select name="target_pace_code">
+                <option value="">Non précisé</option>
+                <?php foreach($athletePaces as $pacePreset): ?>
+                    <option value="<?=e($pacePreset['code'])?>" <?=($session['target_pace_code'] ?? '') === $pacePreset['code'] ? 'selected' : ''?>>
+                        <?=e($pacePreset['label'])?> · <?=e(rtrim(rtrim(number_format((float)$pacePreset['percent_vma'], 2, ',', ' '), '0'), ','))?>% VMA
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+    <?php elseif ($fieldKey === 'actual_distance_km'): ?>
+        <div class="field">
+            <label>Volume réalisé (km)</label>
+            <input type="number" name="actual_distance_km" min="0" step="0.01" value="<?=e($session['actual_distance_km'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'description'): ?>
+        <div class="field full">
+            <label>Contenu de séance</label>
+            <textarea name="description"><?=e($session['description'] ?? '')?></textarea>
+        </div>
+    <?php elseif ($fieldKey === 'warmup'): ?>
+        <div class="field">
+            <label>Échauffement</label>
+            <textarea name="warmup"><?=e($session['warmup'] ?? '')?></textarea>
+        </div>
+    <?php elseif ($fieldKey === 'main_workout'): ?>
+        <div class="field">
+            <label>Corps de séance</label>
+            <textarea name="main_workout"><?=e($session['main_workout'] ?? '')?></textarea>
+        </div>
+    <?php elseif ($fieldKey === 'coach_notes'): ?>
+        <div class="field full">
+            <label>Conseils du coach</label>
+            <textarea name="coach_notes"><?=e($session['coach_notes'] ?? '')?></textarea>
+        </div>
+    <?php elseif ($fieldKey === 'duration_min'): ?>
+        <div class="field">
+            <label>Durée prévue (min)</label>
+            <input type="number" name="duration_min" min="1" step="5" value="<?=e($session['duration_min'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'actual_duration_min'): ?>
+        <div class="field">
+            <label>Durée réelle (min)</label>
+            <input type="number" name="actual_duration_min" min="1" step="5" value="<?=e($session['actual_duration_min'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'vma_percent'): ?>
+        <div class="field">
+            <label>% VMA cible</label>
+            <input type="number" name="vma_percent" min="40" max="130" step="0.1" value="<?=e($session['vma_percent'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'external_link'): ?>
+        <div class="field">
+            <label>Lien optionnel</label>
+            <input name="external_link" value="<?=e($session['external_link'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'feeling'): ?>
+        <div class="field">
+            <label>Ressenti athlète / 10</label>
+            <input type="number" name="feeling" min="1" max="10" step="1" value="<?=e($session['feeling'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'pain'): ?>
+        <div class="field">
+            <label>Douleur / fatigue / 10</label>
+            <input type="number" name="pain" min="0" max="10" step="1" value="<?=e($session['pain'] ?? '')?>">
+        </div>
+    <?php elseif ($fieldKey === 'athlete_feedback'): ?>
+        <div class="field full">
+            <label>Retour athlète</label>
+            <textarea name="athlete_feedback"><?=e($session['athlete_feedback'] ?? '')?></textarea>
+        </div>
+    <?php elseif ($fieldKey === 'attachment'): ?>
+        <div class="field full">
+            <label>Pièce jointe</label>
+            <input type="file" name="attachment">
+        </div>
+    <?php endif;
+}
+
 if ($page === 'login') {
     header_html('Connexion');
 
@@ -580,6 +711,57 @@ if ($page === 'run_migrations') {
         <a class="btn" href="index.php?page=dashboard">Retour dashboard</a>
         <a class="btn secondary" href="index.php?page=coach_calendar">Ouvrir le calendrier</a>
     </div>
+</section>
+<?php
+    footer_html();
+    exit;
+}
+
+if ($page === 'coach_settings') {
+    require_role('coach');
+
+    $settingsReady = coach_session_field_settings_ready();
+    $visibility = get_coach_session_field_visibility((int)$u['id']);
+    $fieldOptions = session_field_options();
+    $success = $_SESSION['success'] ?? null;
+    unset($_SESSION['success']);
+
+    header_html('Paramètres coach');
+?>
+<?php if($success): ?>
+    <div class="success-alert" role="status"><?=e($success)?></div>
+<?php endif; ?>
+
+<div class="toolbar">
+    <h1>Paramètres coach</h1>
+    <div class="actions">
+        <a class="btn secondary" href="index.php?page=dashboard">Retour athlètes</a>
+    </div>
+</div>
+
+<section class="card">
+    <h2>Création de séance</h2>
+    <p class="muted-text">Choisis les champs affichés directement dans le formulaire. Les champs décochés restent disponibles dans “Champs masqués”.</p>
+
+    <?php if(!$settingsReady): ?>
+        <div class="alert">La personnalisation sera active après passage par la page Migrations.</div>
+    <?php endif; ?>
+
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+        <input type="hidden" name="action" value="save_coach_settings">
+
+        <div class="settings-grid">
+            <?php foreach($fieldOptions as $fieldKey => $label): ?>
+                <label class="setting-choice">
+                    <input type="checkbox" name="session_fields[]" value="<?=e($fieldKey)?>" <?=!empty($visibility[$fieldKey]) ? 'checked' : ''?>>
+                    <span><?=e($label)?></span>
+                </label>
+            <?php endforeach; ?>
+        </div>
+
+        <button class="btn" type="submit">Enregistrer les paramètres</button>
+    </form>
 </section>
 <?php
     footer_html();
@@ -1536,6 +1718,14 @@ if ($page === 'calendar') {
 
 if ($page === 'edit_session') {
     require_role('coach');
+    $fieldVisibility = get_coach_session_field_visibility((int)$u['id']);
+    $fieldKeys = array_keys(session_field_options());
+    $visibleFields = array_values(array_filter($fieldKeys, function ($fieldKey) use ($fieldVisibility) {
+        return !empty($fieldVisibility[$fieldKey]);
+    }));
+    $hiddenFields = array_values(array_filter($fieldKeys, function ($fieldKey) use ($fieldVisibility) {
+        return empty($fieldVisibility[$fieldKey]);
+    }));
 
     $session = null;
     $athleteId = (int)($_GET['athlete_id'] ?? 0);
@@ -1573,125 +1763,20 @@ if ($page === 'edit_session') {
                 <input name="title" value="<?=e($session['title'] ?? '')?>" required>
             </div>
 
-            <div class="field">
-                <label>Type</label>
-                <select name="type">
-                    <?php foreach(session_types() as $t): ?>
-                        <option <?=$t === ($session['type'] ?? 'footing') ? 'selected' : ''?>>
-                            <?=e($t)?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
+            <?php foreach($visibleFields as $fieldKey): ?>
+                <?php session_form_field($fieldKey, $session ?? [], $athletePaces); ?>
+            <?php endforeach; ?>
 
-            <div class="field">
-                <label>Statut</label>
-                <select name="status">
-                    <?php foreach(session_statuses() as $value => $label): ?>
-                        <option value="<?=$value?>" <?=$value === ($session['status'] ?? 'planned') ? 'selected' : ''?>>
-                            <?=e($label)?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-
-            <div class="field">
-                <label>Intensite</label>
-                <select name="intensity">
-                    <?php foreach(intensities() as $value => $label): ?>
-                        <option value="<?=$value?>" <?=$value === ($session['intensity'] ?? 'moderate') ? 'selected' : ''?>>
-                            <?=e($label)?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-
-            <div class="field">
-                <label>Volume total prévu (km)</label>
-                <input type="number" name="planned_distance_km" min="0" step="0.01" value="<?=e($session['planned_distance_km'] ?? '')?>">
-            </div>
-
-            <div class="field">
-                <label>Rythme visé</label>
-                <select name="target_pace_code">
-                    <option value="">Non précisé</option>
-                    <?php foreach($athletePaces as $pacePreset): ?>
-                        <option value="<?=e($pacePreset['code'])?>" <?=($session['target_pace_code'] ?? '') === $pacePreset['code'] ? 'selected' : ''?>>
-                            <?=e($pacePreset['label'])?> · <?=e(rtrim(rtrim(number_format((float)$pacePreset['percent_vma'], 1, ',', ' '), '0'), ','))?>% VMA
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-
-            <div class="field">
-                <label>Volume réalisé (km)</label>
-                <input type="number" name="actual_distance_km" min="0" step="0.01" value="<?=e($session['actual_distance_km'] ?? '')?>">
-            </div>
-
-            <div class="field full">
-                <label>Contenu de séance</label>
-                <textarea name="description"><?=e($session['description'] ?? '')?></textarea>
-            </div>
-
-            <div class="field">
-                <label>Ressenti athlete / 10</label>
-                <input type="number" name="feeling" min="1" max="10" step="1" value="<?=e($session['feeling'] ?? '')?>">
-            </div>
-
-            <div class="field">
-                <label>Douleur / fatigue / 10</label>
-                <input type="number" name="pain" min="0" max="10" step="1" value="<?=e($session['pain'] ?? '')?>">
-            </div>
-
-            <div class="field full">
-                <label>Retour athlete</label>
-                <textarea name="athlete_feedback"><?=e($session['athlete_feedback'] ?? '')?></textarea>
-            </div>
-
-            <details class="advanced-fields full">
-                <summary>Options avancées</summary>
-                <div class="form-grid">
-                    <div class="field">
-                        <label>Durée prévue (min)</label>
-                        <input type="number" name="duration_min" min="1" step="5" value="<?=e($session['duration_min'] ?? '')?>">
+            <?php if($hiddenFields): ?>
+                <details class="advanced-fields full">
+                    <summary>Champs masqu�s</summary>
+                    <div class="form-grid">
+                        <?php foreach($hiddenFields as $fieldKey): ?>
+                            <?php session_form_field($fieldKey, $session ?? [], $athletePaces); ?>
+                        <?php endforeach; ?>
                     </div>
-
-                    <div class="field">
-                        <label>Durée réelle (min)</label>
-                        <input type="number" name="actual_duration_min" min="1" step="5" value="<?=e($session['actual_duration_min'] ?? '')?>">
-                    </div>
-
-                    <div class="field">
-                        <label>% VMA cible</label>
-                        <input type="number" name="vma_percent" min="40" max="130" step="0.1" value="<?=e($session['vma_percent'] ?? '')?>">
-                    </div>
-
-                    <div class="field">
-                        <label>Lien optionnel</label>
-                        <input name="external_link" value="<?=e($session['external_link'] ?? '')?>">
-                    </div>
-
-                    <div class="field">
-                        <label>Échauffement</label>
-                        <textarea name="warmup"><?=e($session['warmup'] ?? '')?></textarea>
-                    </div>
-
-                    <div class="field">
-                        <label>Corps de séance</label>
-                        <textarea name="main_workout"><?=e($session['main_workout'] ?? '')?></textarea>
-                    </div>
-
-                    <div class="field full">
-                        <label>Conseils du coach</label>
-                        <textarea name="coach_notes"><?=e($session['coach_notes'] ?? '')?></textarea>
-                    </div>
-                </div>
-            </details>
-
-            <div class="field full">
-                <label>Pièce jointe</label>
-                <input type="file" name="attachment">
-            </div>
+                </details>
+            <?php endif; ?>
         </div>
 
         <button class="btn">Enregistrer</button>

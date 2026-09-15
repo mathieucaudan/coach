@@ -61,13 +61,14 @@ function table_has_column(string $table, string $column): bool {
         'athlete_paces' => ['id', 'athlete_id', 'code', 'label', 'percent_vma', 'sort_order', 'created_at', 'updated_at'],
         'session_debriefs' => ['id', 'session_id', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
         'daily_debriefs' => ['id', 'athlete_id', 'date', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
+        'coach_session_field_settings' => ['coach_id', 'field_key', 'visible', 'updated_at'],
         'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
     ];
     if (in_array($column, $knownColumns[$table] ?? [], true)) return true;
 
     static $cache = [];
     $key = $table . '.' . $column;
-    if (array_key_exists($key, $cache)) return $cache[$key];
+    if (!empty($cache[$key])) return true;
 
     try {
         $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
@@ -82,7 +83,7 @@ function table_has_column(string $table, string $column): bool {
 
 function table_exists(string $table): bool {
     static $cache = [];
-    if (array_key_exists($table, $cache)) return $cache[$table];
+    if (!empty($cache[$table])) return true;
 
     try {
         $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
@@ -343,6 +344,106 @@ function sync_athlete_paces(int $athleteId, array $paces): void {
     }
 }
 
+function ensure_athlete_paces(int $athleteId): void {
+    if (!athlete_paces_ready()) return;
+
+    $stmt = db()->prepare('SELECT COUNT(*) FROM athlete_paces WHERE athlete_id=?');
+    $stmt->execute([$athleteId]);
+    if ((int)$stmt->fetchColumn() > 0) return;
+
+    sync_athlete_paces($athleteId, default_pace_presets());
+}
+
+function seed_missing_athlete_paces(): void {
+    if (!athlete_paces_ready() || !table_exists('athletes')) return;
+
+    $stmt = db()->query('SELECT id FROM athletes ORDER BY id');
+    foreach ($stmt->fetchAll() as $athlete) {
+        ensure_athlete_paces((int)$athlete['id']);
+    }
+}
+
+function session_field_options(): array {
+    return [
+        'type' => 'Type',
+        'status' => 'Statut',
+        'intensity' => 'Intensité',
+        'planned_distance_km' => 'Volume total prévu (km)',
+        'target_pace_code' => 'Rythme visé',
+        'actual_distance_km' => 'Volume réalisé (km)',
+        'description' => 'Contenu de séance',
+        'warmup' => 'Échauffement',
+        'main_workout' => 'Corps de séance',
+        'coach_notes' => 'Conseils du coach',
+        'duration_min' => 'Durée prévue (min)',
+        'actual_duration_min' => 'Durée réelle (min)',
+        'vma_percent' => '% VMA cible',
+        'external_link' => 'Lien optionnel',
+        'feeling' => 'Ressenti athlète / 10',
+        'pain' => 'Douleur / fatigue / 10',
+        'athlete_feedback' => 'Retour athlète',
+        'attachment' => 'Pièce jointe',
+    ];
+}
+
+function default_session_field_visibility(): array {
+    return [
+        'type' => true,
+        'status' => true,
+        'intensity' => true,
+        'planned_distance_km' => true,
+        'target_pace_code' => true,
+        'actual_distance_km' => false,
+        'description' => true,
+        'warmup' => false,
+        'main_workout' => false,
+        'coach_notes' => false,
+        'duration_min' => false,
+        'actual_duration_min' => false,
+        'vma_percent' => false,
+        'external_link' => false,
+        'feeling' => false,
+        'pain' => false,
+        'athlete_feedback' => false,
+        'attachment' => false,
+    ];
+}
+
+function coach_session_field_settings_ready(): bool {
+    return table_exists('coach_session_field_settings');
+}
+
+function get_coach_session_field_visibility(int $coachId): array {
+    $visibility = default_session_field_visibility();
+    if (!coach_session_field_settings_ready()) return $visibility;
+
+    $stmt = db()->prepare('SELECT field_key, visible FROM coach_session_field_settings WHERE coach_id=?');
+    $stmt->execute([$coachId]);
+    foreach ($stmt->fetchAll() as $row) {
+        if (array_key_exists($row['field_key'], $visibility)) {
+            $visibility[$row['field_key']] = (bool)$row['visible'];
+        }
+    }
+
+    return $visibility;
+}
+
+function save_coach_session_field_visibility(int $coachId, array $visibleFields): void {
+    if (!coach_session_field_settings_ready()) return;
+
+    $allowed = array_keys(session_field_options());
+    $visibleMap = array_fill_keys(array_values($visibleFields), true);
+    $stmt = db()->prepare(
+        'INSERT INTO coach_session_field_settings (coach_id, field_key, visible, updated_at)
+         VALUES (?,?,?,NOW())
+         ON DUPLICATE KEY UPDATE visible=VALUES(visible), updated_at=NOW()'
+    );
+
+    foreach ($allowed as $fieldKey) {
+        $stmt->execute([$coachId, $fieldKey, isset($visibleMap[$fieldKey]) ? 1 : 0]);
+    }
+}
+
 function empty_debrief(): array {
     return [
         'id' => null,
@@ -592,7 +693,7 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
 
 function create_quick_session(int $athleteId, string $date, string $title, string $description): int {
     $user = current_user();
-    if (!$user || $user['role'] !== 'coach' || !can_access_athlete($athleteId)) {
+    if (!$user || !in_array($user['role'], ['coach', 'super_admin'], true) || !can_access_athlete($athleteId)) {
         http_response_code(403);
         exit('Accès refusé');
     }
@@ -691,6 +792,23 @@ function run_pending_migrations(): array {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
         $applied[] = 'athlete_paces';
+    }
+    seed_missing_athlete_paces();
+
+    if (!table_exists('coach_session_field_settings')) {
+        db()->exec(
+            'CREATE TABLE coach_session_field_settings (
+                coach_id INT NOT NULL,
+                field_key VARCHAR(80) NOT NULL,
+                visible TINYINT(1) NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (coach_id, field_key),
+                CONSTRAINT fk_coach_session_field_settings_coach
+                    FOREIGN KEY (coach_id) REFERENCES users(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        $applied[] = 'coach_session_field_settings';
     }
 
     if (!table_exists('athlete_coaches')) {

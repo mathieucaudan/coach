@@ -274,6 +274,32 @@ p{
     margin-bottom:6px
 }
 
+.settings-grid{
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+    margin:16px 0 20px
+}
+
+.setting-choice{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    min-height:46px;
+    border:1px solid var(--line);
+    border-radius:14px;
+    background:var(--surface-soft);
+    color:var(--ink);
+    font-weight:800;
+    padding:10px 12px
+}
+
+.setting-choice input{
+    width:18px;
+    height:18px;
+    accent-color:var(--primary)
+}
+
 .stat-card strong,
 .metric-box strong,
 .pace-cell strong{
