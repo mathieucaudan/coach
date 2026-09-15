@@ -793,6 +793,7 @@ if ($page === 'admin') {
     <div class="actions">
         <a class="btn secondary" href="index.php?page=dashboard">Voir tous les athlètes</a>
         <a class="btn secondary" href="index.php?page=coach_calendar">Calendrier général</a>
+        <a class="btn" href="index.php?page=coach_settings">Parametres</a>
     </div>
 </div>
 
@@ -1064,6 +1065,7 @@ if ($page === 'dashboard') {
 
     <div class="actions">
         <a class="btn" href="index.php?page=coach_calendar">Calendrier général</a>
+        <a class="btn secondary" href="index.php?page=coach_settings">Parametres</a>
     </div>
 
     <form>
