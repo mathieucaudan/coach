@@ -28,6 +28,15 @@ if ($page === 'logout') {
     redirect('index.php?page=login');
 }
 
+if ($page === 'bank_callback') {
+    require_banking_access();
+    try {
+        $result = banking_service()->completeConnection((int)current_user()['id'], (string)($_GET['state'] ?? ''));
+        $_SESSION['success'] = $result['pending'] ? 'Autorisation reçue. La banque finalise encore la connexion.' : $result['accounts'].' compte(s) bancaire(s) connecté(s).';
+    } catch (Throwable $e) { $_SESSION['error'] = $e->getMessage(); }
+    redirect('index.php?page=banking');
+}
+
 try {
 if ($action) {
     verify_csrf();
@@ -82,6 +91,28 @@ if ($action) {
         $_SESSION['success'] = 'Paramètres enregistrés.';
 
         redirect('index.php?page=coach_settings');
+    }
+
+    if ($action === 'bank_connect') {
+        require_banking_access();
+        if (!table_exists('bank_connections')) throw new RuntimeException('Appliquez d’abord la migration bancaire.');
+        $institutions = banking_service()->creditAgricoleInstitutions();
+        $selected = null; foreach($institutions as $institution) if(hash_equals((string)($institution['id']??''),(string)($_POST['institution_id']??''))) {$selected=$institution;break;}
+        if(!$selected) throw new InvalidArgumentException('Caisse régionale inconnue.');
+        $created=banking_service()->startConnection((int)$user['id'],(string)$selected['id'],(string)$selected['name'],app_base_url().'/index.php?page=bank_callback');
+        if(empty($created['link'])) throw new RuntimeException('La banque n’a pas fourni de lien de connexion.');
+        redirect($created['link']);
+    }
+
+    if ($action === 'bank_sync') {
+        require_banking_access(); $id=(int)($_POST['account_id']??0);
+        $s=db()->prepare('SELECT a.id FROM bank_accounts a JOIN bank_connections c ON c.id=a.bank_connection_id WHERE a.id=? AND c.user_id=?');$s->execute([$id,$user['id']]);if(!$s->fetch())throw new RuntimeException('Compte introuvable.');
+        $result=banking_service()->syncBankAccount($id);$_SESSION['success']=$result['new'].' nouvelle(s) opération(s), '.$result['existing'].' déjà connue(s).';redirect('index.php?page=banking');
+    }
+
+    if ($action === 'bank_disconnect') {
+        require_banking_access(); if(($_POST['confirm']??'')!=='yes')throw new InvalidArgumentException('Confirmation requise.');
+        banking_service()->disconnect((int)$_POST['connection_id'],(int)$user['id']);$_SESSION['success']='Banque déconnectée. L’historique est conservé.';redirect('index.php?page=banking');
     }
 
     if ($action === 'create_athlete') {
@@ -394,6 +425,7 @@ function header_html(string $title) {
             <?php if($u['role'] === 'super_admin'): ?>
                 <a href="index.php?page=admin">Admin</a>
                 <a href="index.php?page=run_migrations">Migrations</a>
+                <a href="index.php?page=banking">Comptabilité · Banque</a>
             <?php endif; ?>
             <a href="index.php?page=dashboard">Athlètes</a>
             <a href="index.php?page=coach_calendar">Calendrier général</a>
@@ -669,6 +701,11 @@ if ($page === 'login') {
 
 require_login();
 $u = current_user();
+
+if ($page === 'banking') {
+    require __DIR__ . '/services/banking/banking_page.php';
+    exit;
+}
 
 if ($page === 'home') {
     if ($u['role'] === 'super_admin') {
@@ -1771,7 +1808,7 @@ if ($page === 'edit_session') {
 
             <?php if($hiddenFields): ?>
                 <details class="advanced-fields full">
-                    <summary>Champs masqu�s</summary>
+                    <summary>Champs masqués</summary>
                     <div class="form-grid">
                         <?php foreach($hiddenFields as $fieldKey): ?>
                             <?php session_form_field($fieldKey, $session ?? [], $athletePaces); ?>

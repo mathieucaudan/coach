@@ -7,11 +7,15 @@ node_modules/
 dist/
 _legacy_hostinger/
 config.php
+.env
+.env.*
+!.env.example
 uploads/
 android/
 src/
 _bmad-output/
-docs/
+docs/*
+!docs/BANKING_GOCARDLESS.md
 package.json
 package-lock.json
 vite.config.ts
