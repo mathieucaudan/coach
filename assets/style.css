@@ -1192,9 +1192,3 @@ p{
         grid-template-columns:1fr
     }
 }
-
-.bank-account-card{border-left:4px solid var(--primary,#315c49)}
-.bank-balance{font-size:2rem;font-weight:800;margin:12px 0}
-.bank-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-bottom:18px}
-.table-scroll{overflow-x:auto}.money{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}.money.positive{color:#177245}.money.negative{color:#a83434}
-.pagination{display:flex;gap:7px;flex-wrap:wrap;margin-top:18px}.pagination a{padding:7px 11px;border-radius:8px;background:#eef2ef;text-decoration:none}.pagination a.active{background:#315c49;color:#fff}

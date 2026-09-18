@@ -8,18 +8,10 @@ if ($debugEnabled) {
 
 if (!file_exists(__DIR__ . '/config.php')) {
     http_response_code(500);
-    if (PHP_SAPI === 'cli') { fwrite(STDERR, "config.php manquant.\n"); exit(2); }
     exit($debugEnabled ? 'config.php manquant dans public_html.' : 'Configuration manquante.');
 }
 
 require_once __DIR__ . '/config.php';
-foreach (['GOCARDLESS_SECRET_ID', 'GOCARDLESS_SECRET_KEY', 'APP_URL', 'APP_ENV', 'BANKING_MOCK_MODE'] as $environmentKey) {
-    if (!defined($environmentKey) && getenv($environmentKey) !== false) {
-        $value = getenv($environmentKey);
-        define($environmentKey, $environmentKey === 'BANKING_MOCK_MODE' ? filter_var($value, FILTER_VALIDATE_BOOLEAN) : $value);
-    }
-}
-require_once __DIR__ . '/services/banking/BankingService.php';
 
 if (!defined('APP_NAME')) {
     define('APP_NAME', 'Coach Training Planner');
@@ -48,16 +40,6 @@ function e($value): string { return htmlspecialchars((string)$value, ENT_QUOTES,
 function redirect(string $url) { header('Location: ' . $url); exit; }
 function current_user() { return $_SESSION['user'] ?? null; }
 function is_super_admin(): bool { return (current_user()['role'] ?? null) === 'super_admin'; }
-function require_banking_access(): void { require_login(); if (!BankingService::canManageBanking(current_user())) { http_response_code(403); exit('Accès refusé'); } }
-function banking_service(): BankingService { return new BankingService(db(), BankingService::provider(db())); }
-function banking_config(string $key, $default = '') { $env=getenv($key); if($env!==false&&$env!=='')return $key==='BANKING_MOCK_MODE'?filter_var($env,FILTER_VALIDATE_BOOLEAN):$env; return defined($key)?constant($key):$default; }
-function app_base_url(): string {
-    if (banking_config('APP_URL')) return rtrim((string)banking_config('APP_URL'), '/');
-    $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
-    return ($https ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/');
-}
-function mask_iban(?string $iban): string { if (!$iban) return 'Non disponible'; $v=preg_replace('/\s+/','',$iban); return substr($v,0,4).' •••• •••• •••• '.substr($v,-4); }
-function format_money($amount, string $currency='EUR'): string { if($amount===null||$amount==='')return 'Indisponible'; return number_format((float)$amount,2,',',' ').' '.($currency==='EUR'?'€':$currency); }
 function require_login() { if (!current_user()) redirect('index.php?page=login'); }
 function require_role(string $role) {
     require_login();
@@ -744,13 +726,6 @@ function create_quick_session(int $athleteId, string $date, string $title, strin
 
 function run_pending_migrations(): array {
     $applied = [];
-
-    if (array_filter(['bank_connections','bank_provider_tokens','bank_accounts','bank_transactions','bank_sync_logs','bank_rules'], function($table){ return !table_exists($table); })) {
-        $sql = file_get_contents(__DIR__ . '/migrations/2026-09-17_banking.sql');
-        foreach (array_filter(array_map('trim', preg_split('/;\s*(?:\r?\n|$)/', (string)$sql))) as $statement) db()->exec($statement);
-        $applied[] = 'banking_gocardless';
-    }
-    if (table_exists('bank_transactions')) add_column_if_missing('bank_transactions','suggested_label','VARCHAR(255) NULL AFTER reconciliation_score',$applied);
 
     if (user_role_needs_migration()) {
         try {

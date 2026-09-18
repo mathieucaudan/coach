@@ -1,7 +1,1 @@
 DirectoryIndex index.php
-Options -Indexes
-RewriteEngine On
-RewriteRule ^(?:services|bin|tests|migrations|docs)/ - [F,L]
-<FilesMatch "^(?:config\.php|\.env.*)$">
-    Require all denied
-</FilesMatch>

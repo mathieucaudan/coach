@@ -6,14 +6,6 @@ const DB_USER = 'your_database_user';
 const DB_PASS = 'your_database_password';
 
 const APP_NAME = 'Coach Training Planner';
-const APP_ENV = 'production';
-const APP_URL = 'https://example.org';
-
-// GoCardless Bank Account Data (server-side only).
-const GOCARDLESS_SECRET_ID = '';
-const GOCARDLESS_SECRET_KEY = '';
-// Development only. APP_ENV=production always refuses this mode.
-const BANKING_MOCK_MODE = false;
 
 // Optional: used by the in-app Migrations page to create or update the first super admin.
 // Remove or change these values after the account has been created.
