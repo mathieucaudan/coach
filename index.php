@@ -8,7 +8,7 @@ if ($debugEnabled) {
         $error = error_get_last();
         if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
             http_response_code(500);
-            echo '<pre style="white-space:pre-wrap;background:#111;color:#f7f7f7;padding:16px">';
+            echo '<pre style="white-space:pre-wrap;overflow:auto;background:#111827;color:#f8fafc;padding:16px;margin:0">';
             echo htmlspecialchars($error['message'] . "\n" . $error['file'] . ':' . $error['line'], ENT_QUOTES, 'UTF-8');
             echo '</pre>';
         }
@@ -656,7 +656,7 @@ if ($page === 'login') {
 
         <button class="btn" type="submit">Se connecter</button>
 
-        <p style="margin-top:18px;font-size:13px">
+        <p class="auth-help">
             Utilise les identifiants crees dans Hostinger.
         </p>
     </form>
@@ -1771,7 +1771,7 @@ if ($page === 'edit_session') {
 
             <?php if($hiddenFields): ?>
                 <details class="advanced-fields full">
-                    <summary>Champs masqu�s</summary>
+                    <summary>Champs masqués</summary>
                     <div class="form-grid">
                         <?php foreach($hiddenFields as $fieldKey): ?>
                             <?php session_form_field($fieldKey, $session ?? [], $athletePaces); ?>
@@ -1815,7 +1815,7 @@ if ($page === 'session') {
             <h1><?=e($s['title'])?></h1>
             <p>
                 <?=e($s['date'])?> ·
-                <span class="session-pill <?=type_class($s['type'])?>" style="display:inline-block">
+                <span class="session-pill session-pill-inline <?=type_class($s['type'])?>">
                     <?=e($s['type'])?>
                 </span>
                 <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
