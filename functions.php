@@ -761,16 +761,32 @@ function run_pending_migrations(): array {
         $applied[] = 'super_admin_config';
     }
 
+    // No AFTER clauses: older production schemas may lack the anchor columns.
+    if (table_exists('athletes')) {
+        add_column_if_missing('athletes', 'sport', "VARCHAR(80) NOT NULL DEFAULT 'Course'", $applied);
+        add_column_if_missing('athletes', 'level', "VARCHAR(80) NOT NULL DEFAULT 'Intermediaire'", $applied);
+        add_column_if_missing('athletes', 'goal', 'TEXT NULL', $applied);
+        add_column_if_missing('athletes', 'vma', 'DECIMAL(4,1) NOT NULL DEFAULT 15', $applied);
+        add_column_if_missing('athletes', 'notes', 'TEXT NULL', $applied);
+    }
     if (table_exists('sessions')) {
-        add_column_if_missing('sessions', 'planned_distance_km', 'DECIMAL(6,2) NULL AFTER duration_min', $applied);
-        add_column_if_missing('sessions', 'actual_distance_km', 'DECIMAL(6,2) NULL AFTER actual_duration_min', $applied);
-        add_column_if_missing('sessions', 'target_pace_code', 'VARCHAR(40) NULL AFTER vma_percent', $applied);
+        add_column_if_missing('sessions', 'status', "VARCHAR(32) NOT NULL DEFAULT 'planned'", $applied);
+        add_column_if_missing('sessions', 'intensity', "VARCHAR(32) NOT NULL DEFAULT 'moderate'", $applied);
+        add_column_if_missing('sessions', 'duration_min', 'INT NULL', $applied);
+        add_column_if_missing('sessions', 'vma_percent', 'DECIMAL(5,2) NULL', $applied);
+        add_column_if_missing('sessions', 'planned_distance_km', 'DECIMAL(6,2) NULL', $applied);
+        add_column_if_missing('sessions', 'actual_duration_min', 'INT NULL', $applied);
+        add_column_if_missing('sessions', 'actual_distance_km', 'DECIMAL(6,2) NULL', $applied);
+        add_column_if_missing('sessions', 'target_pace_code', 'VARCHAR(40) NULL', $applied);
+        add_column_if_missing('sessions', 'feeling', 'TINYINT NULL', $applied);
+        add_column_if_missing('sessions', 'pain', 'TINYINT NULL', $applied);
+        add_column_if_missing('sessions', 'athlete_feedback', 'TEXT NULL', $applied);
     }
     if (table_exists('session_debriefs')) {
-        add_column_if_missing('session_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL AFTER lactates', $applied);
+        add_column_if_missing('session_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL', $applied);
     }
     if (table_exists('daily_debriefs')) {
-        add_column_if_missing('daily_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL AFTER lactates', $applied);
+        add_column_if_missing('daily_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL', $applied);
     }
 
     if (!table_exists('athlete_paces')) {

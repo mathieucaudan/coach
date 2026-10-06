@@ -78,8 +78,12 @@ if ($action) {
     if ($action === 'save_coach_settings') {
         require_role('coach');
 
-        save_coach_session_field_visibility((int)$user['id'], $_POST['session_fields'] ?? []);
-        $_SESSION['success'] = 'Paramètres enregistrés.';
+        if (coach_session_field_settings_ready()) {
+            save_coach_session_field_visibility((int)$user['id'], $_POST['session_fields'] ?? []);
+            $_SESSION['success'] = 'Paramètres enregistrés.';
+        } else {
+            $_SESSION['success'] = 'Paramètres non enregistrés : lance d\'abord la page Migrations.';
+        }
 
         redirect('index.php?page=coach_settings');
     }
@@ -1486,6 +1490,8 @@ if ($page === 'coach_calendar') {
                 <a class="empty-day-action" href="index.php?page=quick_session&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Ajouter une séance le <?=e(format_full_date($date))?>" title="Ajouter une séance">
                     <span aria-hidden="true">+</span>
                 </a>
+            <?php elseif($selectedAthleteId > 0): ?>
+                <a class="day-add-link" href="index.php?page=quick_session&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Ajouter une autre séance le <?=e(format_full_date($date))?>" title="Ajouter une autre séance">+</a>
             <?php endif; ?>
 
             <?php if($dailyDebrief): ?>
