@@ -113,6 +113,17 @@ function user_role_needs_migration(): bool {
     }
 }
 
+function column_data_type(string $table, string $column): ?string {
+    try {
+        $stmt = db()->prepare('SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1');
+        $stmt->execute([$table, $column]);
+        $type = $stmt->fetchColumn();
+        return $type === false ? null : strtolower((string)$type);
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
 function add_column_if_missing(string $table, string $column, string $definition, array &$applied): void {
     if (table_has_column($table, $column)) return;
 
@@ -768,6 +779,11 @@ function run_pending_migrations(): array {
         add_column_if_missing('athletes', 'goal', 'TEXT NULL', $applied);
         add_column_if_missing('athletes', 'vma', 'DECIMAL(4,1) NOT NULL DEFAULT 15', $applied);
         add_column_if_missing('athletes', 'notes', 'TEXT NULL', $applied);
+    }
+    // Legacy schemas declare sessions.type as an ENUM, which silently blanks new types like vélo.
+    if (table_exists('sessions') && column_data_type('sessions', 'type') === 'enum') {
+        db()->exec("ALTER TABLE sessions MODIFY type VARCHAR(64) NULL DEFAULT 'footing'");
+        $applied[] = 'sessions.type';
     }
     if (table_exists('sessions')) {
         add_column_if_missing('sessions', 'status', "VARCHAR(32) NOT NULL DEFAULT 'planned'", $applied);
