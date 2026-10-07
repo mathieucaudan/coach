@@ -272,7 +272,7 @@ if ($action) {
             ]);
         }
 
-        redirect('index.php?page=calendar&athlete_id='.$athleteId.'&month='.substr($_POST['date'], 0, 7));
+        redirect(session_calendar_url($athleteId, substr($_POST['date'], 0, 7)));
     }
 
     if ($action === 'delete_session') {
@@ -282,7 +282,7 @@ if ($action) {
 
         db()->prepare('DELETE FROM sessions WHERE id=?')->execute([$s['id']]);
 
-        redirect('index.php?page=calendar&athlete_id='.$s['athlete_id']);
+        redirect(session_calendar_url((int)$s['athlete_id'], substr($s['date'], 0, 7)));
     }
 
     if ($action === 'duplicate_session') {
@@ -318,7 +318,7 @@ if ($action) {
             'external_link' => $s['external_link'],
         ]);
 
-        redirect('index.php?page=calendar&athlete_id='.$s['athlete_id'].'&month='.substr($date, 0, 7));
+        redirect(session_calendar_url((int)$s['athlete_id'], substr($date, 0, 7)));
     }
 
     if ($action === 'move_session') {
@@ -331,7 +331,7 @@ if ($action) {
             $s['id']
         ]);
 
-        redirect('index.php?page=calendar&athlete_id='.$s['athlete_id'].'&month='.substr($_POST['new_date'], 0, 7));
+        redirect(session_calendar_url((int)$s['athlete_id'], substr($_POST['new_date'], 0, 7)));
     }
 
     if ($action === 'add_comment') {
@@ -994,9 +994,9 @@ if ($page === 'dashboard') {
     $weekStatusWhere = table_has_column('sessions', 'status') ? ' AND status <> "cancelled"' : '';
     $usesDistanceLoad = table_has_column('sessions', 'actual_distance_km') || table_has_column('sessions', 'planned_distance_km');
     $loadExpr = $usesDistanceLoad
-        ? 'COALESCE(SUM(COALESCE(' .
+        ? 'COALESCE(SUM(' . run_equivalent_sql('COALESCE(' .
             (table_has_column('sessions', 'actual_distance_km') ? 'actual_distance_km' : 'NULL') . ', ' .
-            (table_has_column('sessions', 'planned_distance_km') ? 'planned_distance_km' : 'NULL') . ', 0)), 0)'
+            (table_has_column('sessions', 'planned_distance_km') ? 'planned_distance_km' : 'NULL') . ', 0)', 's.type') . '), 0)'
         : (table_has_column('sessions', 'actual_duration_min') || table_has_column('sessions', 'duration_min')
         ? 'COALESCE(SUM(COALESCE(' .
             (table_has_column('sessions', 'actual_duration_min') ? 'actual_duration_min' : 'NULL') . ', ' .
@@ -1544,10 +1544,21 @@ if ($page === 'calendar') {
     $sessions = [];
     $monthSessions = [];
     $nextSession = null;
-    $lastSession = null;
-    $weekSessionCount = 0;
-    $displayLoad = 0;
+    $athletePaces = get_athlete_paces($athleteId);
     [$currentWeekStart, $currentWeekEnd] = week_bounds();
+
+    $weekStatusWhere = table_has_column('sessions', 'status') ? ' AND s.status <> "cancelled"' : '';
+    $weekStmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND s.date BETWEEN ? AND ?' . $weekStatusWhere);
+    $weekStmt->execute([$athleteId, $currentWeekStart, $currentWeekEnd]);
+    $weekSessions = $weekStmt->fetchAll();
+    $weekSessionCount = count($weekSessions);
+    $weekVolumes = ['run' => 0.0, 'bike' => 0.0, 'swim' => 0.0];
+    $weekRunEquivalent = 0.0;
+    foreach ($weekSessions as $weekSession) {
+        $volume = session_volume($weekSession);
+        $weekVolumes[session_sport((string)$weekSession['type'])] += $volume;
+        $weekRunEquivalent += run_equivalent_km($volume, (string)$weekSession['type']);
+    }
 
     $periodSessions = attach_debriefs_to_sessions($stmt->fetchAll());
 
@@ -1559,15 +1570,6 @@ if ($page === 'calendar') {
             $nextSession = $s;
         }
 
-        if ($s['date'] < date('Y-m-d') && (!$lastSession || $s['date'] > $lastSession['date'])) {
-            $lastSession = $s;
-        }
-
-        if ($s['date'] >= $currentWeekStart && $s['date'] <= $currentWeekEnd) {
-            $weekSessionCount++;
-        }
-
-        $displayLoad += (float)($s['actual_distance_km'] ?: ($s['planned_distance_km'] ?: 0));
     }
     $dailyDebriefs = attach_daily_debriefs_to_calendar($sessions, $athleteId, $start, $end);
 
@@ -1587,6 +1589,7 @@ if ($page === 'calendar') {
         <a class="btn secondary" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=$next?>">Mois suivant</a>
 
         <?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
+            <a class="btn secondary" href="index.php?page=edit_athlete&id=<?=$athleteId?>">Modifier le profil</a>
             <a class="btn" href="index.php?page=edit_session&athlete_id=<?=$athleteId?>&date=<?=date('Y-m-d')?>">Ajouter une séance</a>
         <?php endif; ?>
     </div>
@@ -1604,33 +1607,17 @@ if ($page === 'calendar') {
             <p>Le planning est vide pour les prochains jours affiches.</p>
         <?php endif; ?>
     </div>
-    <div class="mini-metrics">
-        <div><strong><?=$weekSessionCount?></strong><span>Cette semaine</span></div>
-        <div><strong><?=e(format_distance($displayLoad))?></strong><span>Volume affiché</span></div>
-        <div><strong><?=e($lastSession ? format_short_date($lastSession['date']) : '-')?></strong><span>Derniere</span></div>
+    <div class="mini-metrics week-metrics">
+        <div><strong><?=$weekSessionCount?></strong><span>Séances cette semaine</span></div>
+        <div><strong><?=e(format_distance($weekVolumes['run']))?></strong><span>Course / marche</span></div>
+        <div><strong><?=e(format_distance($weekVolumes['bike']))?></strong><span>Vélo</span></div>
+        <div><strong><?=e(format_distance($weekVolumes['swim']))?></strong><span>Natation</span></div>
+        <p class="week-equivalent">Équivalent course semaine : <strong><?=e(format_distance($weekRunEquivalent))?></strong> <small>(4 km vélo = 1 km · 1 km natation = 7 km)</small></p>
     </div>
-</section>
-
-<section class="card athlete-summary">
-    <div class="section-head">
-        <h2>Profil athlete</h2>
-        <?php if(in_array($u['role'], ['coach', 'super_admin'], true)): ?>
-            <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$athleteId?>">Modifier le profil</a>
-        <?php endif; ?>
-    </div>
-    <div class="metrics-row">
-        <div class="metric-box"><strong><?=e($a['sport'])?></strong><span>Sport</span></div>
-        <div class="metric-box"><strong><?=e($a['level'])?></strong><span>Niveau</span></div>
-        <div class="metric-box"><strong><?=e($a['vma'])?> km/h</strong><span>VMA</span></div>
-        <div class="metric-box"><strong><?=e($a['goal'] ?: '-')?></strong><span>Objectif</span></div>
-    </div>
-    <?php if($a['notes']): ?>
-        <p><?=nl2br(e($a['notes']))?></p>
-    <?php endif; ?>
 </section>
 
 <section class="card">
-    <h2>Repères d'allure</h2>
+    <h2>Rappel des allures <small class="muted-text">VMA <?=e($a['vma'])?> km/h</small></h2>
     <div class="pace-grid">
         <?php foreach($athletePaces as $pacePreset):
             $percent = (float)$pacePreset['percent_vma'];

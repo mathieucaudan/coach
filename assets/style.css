@@ -419,6 +419,20 @@ p{
     display:block
 }
 
+.week-metrics{
+    grid-template-columns:repeat(4,minmax(0,1fr))
+}
+
+.week-metrics .week-equivalent{
+    grid-column:1/-1;
+    margin:0;
+    font-size:14px
+}
+
+@media (max-width:640px){
+    .week-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
 .mini-metrics span{
     margin-top:4px;
     color:#c8d6cf;
@@ -902,6 +916,8 @@ p{
 .type-resistance{background:#b45309}
 .type-aerobie{background:#0284c7}
 .type-volume{background:#0369a1}
+.type-velo{background:#65a30d}
+.type-natation{background:#0e7490}
 .type-autre{background:#475569}
 
 .debrief-card{

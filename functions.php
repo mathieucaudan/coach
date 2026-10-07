@@ -934,9 +934,49 @@ function session_types(): array
         'renforcement',
         'aérobie',
         'résistance',
+        'vélo',
+        'natation',
     ];
 }
 function type_class(string $type): string { return 'type-' . str_replace([' ', 'é'], ['-', 'e'], $type); }
+
+// Vélo and natation volumes are tracked apart; this ratio converts them to running km.
+function session_sport_ratios(): array {
+    return [
+        'vélo' => ['sport' => 'bike', 'run_km_per_km' => 0.25],
+        'natation' => ['sport' => 'swim', 'run_km_per_km' => 7],
+    ];
+}
+
+function session_sport(string $type): string {
+    return session_sport_ratios()[$type]['sport'] ?? 'run';
+}
+
+function run_equivalent_km(float $km, string $type): float {
+    return $km * (session_sport_ratios()[$type]['run_km_per_km'] ?? 1);
+}
+
+function run_equivalent_sql(string $distanceExpr, string $typeColumn = 'type'): string {
+    $cases = '';
+    foreach (session_sport_ratios() as $type => $ratio) {
+        $cases .= ' WHEN ' . $typeColumn . ' = ' . db()->quote($type) . ' THEN ' . $distanceExpr . ' * ' . $ratio['run_km_per_km'];
+    }
+    return '(CASE' . $cases . ' ELSE ' . $distanceExpr . ' END)';
+}
+
+function session_volume(array $session): float {
+    return (float)($session['actual_distance_km'] ?: ($session['planned_distance_km'] ?: 0));
+}
+
+// Coaches land on the general calendar after editing a session; athletes keep their own.
+function session_calendar_url(int $athleteId, string $month = ''): string {
+    $month = preg_match('/^\d{4}-\d{2}$/', $month) ? '&month=' . $month : '';
+    $user = current_user();
+    if ($user && in_array($user['role'], ['coach', 'super_admin'], true)) {
+        return 'index.php?page=coach_calendar&athlete_id=' . $athleteId . $month;
+    }
+    return 'index.php?page=calendar&athlete_id=' . $athleteId . $month;
+}
 
 function month_start($month): DateTime {
     if ($month && preg_match('/^\d{4}-\d{2}$/', $month)) return new DateTime($month . '-01');
