@@ -494,7 +494,7 @@ function athlete_pace_fields(array $paces): void {
                     </div>
                     <div>
                         <label for="pace-percent-<?=$i?>">% VMA</label>
-                        <input id="pace-percent-<?=$i?>" type="number" name="paces[<?=$i?>][percent_vma]" min="40" max="130" step="0.1" value="<?=e($pace['percent_vma'])?>">
+                        <input id="pace-percent-<?=$i?>" type="number" name="paces[<?=$i?>][percent_vma]" min="40" max="130" step="0.01" value="<?=e($pace['percent_vma'])?>">
                     </div>
                 </div>
             <?php endforeach; ?>
@@ -595,7 +595,7 @@ function session_form_field(string $fieldKey, array $session, array $athletePace
     <?php elseif ($fieldKey === 'vma_percent'): ?>
         <div class="field">
             <label>% VMA cible</label>
-            <input type="number" name="vma_percent" min="40" max="130" step="0.1" value="<?=e($session['vma_percent'] ?? '')?>">
+            <input type="number" name="vma_percent" min="40" max="130" step="0.01" value="<?=e($session['vma_percent'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'external_link'): ?>
         <div class="field">
@@ -1115,6 +1115,7 @@ if ($page === 'dashboard') {
                 </div>
                 <div class="row-actions">
                     <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$row['id']?>">Calendrier</a>
+                    <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$row['id']?>">Modifier</a>
                     <a class="btn small" href="index.php?page=edit_session&athlete_id=<?=$row['id']?>&date=<?=date('Y-m-d')?>">Seance</a>
                 </div>
             </article>
