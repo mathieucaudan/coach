@@ -1,17 +1,22 @@
 <?php
-$debugEnabled = isset($_GET['debug']) && $_GET['debug'] === '1';
+if (!file_exists(__DIR__ . '/config.php')) {
+    http_response_code(500);
+    exit('Configuration manquante.');
+}
+
+require_once __DIR__ . '/config.php';
+
+// Debug output is opt-in from config.php only, never from the URL.
+$debugEnabled = defined('APP_DEBUG') && APP_DEBUG;
 if ($debugEnabled) {
     ini_set('display_errors', '1');
     ini_set('display_startup_errors', '1');
     error_reporting(E_ALL);
+} else {
+    ini_set('display_errors', '0');
 }
 
-if (!file_exists(__DIR__ . '/config.php')) {
-    http_response_code(500);
-    exit($debugEnabled ? 'config.php manquant dans public_html.' : 'Configuration manquante.');
-}
-
-require_once __DIR__ . '/config.php';
+date_default_timezone_set(defined('APP_TIMEZONE') ? APP_TIMEZONE : 'Europe/Paris');
 
 if (!defined('APP_NAME')) {
     define('APP_NAME', 'Coach Training Planner');
@@ -32,6 +37,8 @@ function db(): PDO {
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);
+        // Keep CURDATE()/NOW() on the same clock as PHP date().
+        $pdo->exec("SET time_zone = '" . (new DateTime())->format('P') . "'");
     }
     return $pdo;
 }
@@ -40,60 +47,122 @@ function e($value): string { return htmlspecialchars((string)$value, ENT_QUOTES,
 function redirect(string $url) { header('Location: ' . $url); exit; }
 function current_user() { return $_SESSION['user'] ?? null; }
 function is_super_admin(): bool { return (current_user()['role'] ?? null) === 'super_admin'; }
-function require_login() { if (!current_user()) redirect('index.php?page=login'); }
+function require_login() {
+    if (current_user()) return;
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && !empty($_GET['page'])) {
+        $_SESSION['after_login'] = 'index.php?' . http_build_query($_GET);
+    }
+    redirect('index.php?page=login');
+}
 function require_role(string $role) {
     require_login();
     $currentRole = current_user()['role'];
     if ($currentRole === $role || ($role === 'coach' && $currentRole === 'super_admin')) return;
-    http_response_code(403);
-    exit('Accès refusé');
+    deny_access();
 }
-function csrf_token(): string { if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(32)); return $_SESSION['csrf']; }
-function verify_csrf() { if (($_POST['csrf'] ?? '') !== ($_SESSION['csrf'] ?? '')) { http_response_code(400); exit('Token CSRF invalide'); } }
 
-function table_has_column(string $table, string $column): bool {
-    $knownColumns = [
-        'users' => ['id', 'name', 'email', 'password_hash', 'role', 'created_at'],
-        'auth_tokens' => ['id', 'user_id', 'selector', 'validator_hash', 'expires_at', 'created_at'],
-        'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
-        'athlete_coaches' => ['athlete_id', 'coach_id', 'created_at'],
-        'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
-        'athlete_paces' => ['id', 'athlete_id', 'code', 'label', 'percent_vma', 'sort_order', 'created_at', 'updated_at'],
-        'session_debriefs' => ['id', 'session_id', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
-        'daily_debriefs' => ['id', 'athlete_id', 'date', 'result', 'difficulty', 'sensations', 'weather', 'temperature_c', 'lactates', 'created_at', 'updated_at'],
-        'coach_session_field_settings' => ['coach_id', 'field_key', 'visible', 'updated_at'],
-        'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
-    ];
-    if (in_array($column, $knownColumns[$table] ?? [], true)) return true;
+function error_page(string $message, int $status = 400): void {
+    $user = current_user();
+    $home = $user ? 'index.php' : 'index.php?page=login';
+    $card = '<section class="card error-card">'
+        . '<h1>' . e($message) . '</h1>'
+        . '<p class="muted-text">Tes saisies sont normalement conservées si tu reviens à la page précédente.</p>'
+        . '<div class="actions">'
+        . '<a class="btn" href="javascript:history.back()">Revenir en arrière</a>'
+        . '<a class="btn secondary" href="' . e($home) . '">Accueil</a>'
+        . '</div></section>';
 
-    static $cache = [];
-    $key = $table . '.' . $column;
-    if (!empty($cache[$key])) return true;
-
-    try {
-        $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
-        $stmt->execute([$table, $column]);
-        $cache[$key] = (bool)$stmt->fetchColumn();
-    } catch (Throwable $e) {
-        $cache[$key] = false;
+    // Part of a page is already out: close it with the card instead of a second document.
+    if (headers_sent()) {
+        echo $card . '</main></body></html>';
+        exit;
     }
 
-    return $cache[$key];
+    http_response_code($status);
+    echo '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
+        . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        . '<title>' . e($message) . ' - ' . e(APP_NAME) . '</title>'
+        . '<link rel="stylesheet" href="assets/style.css"></head><body>'
+        . '<main class="container">' . $card . '</main></body></html>';
+    exit;
+}
+
+function deny_access(): void { error_page('Accès refusé', 403); }
+
+// Logs the real error server-side and shows the user a message without SQL details.
+function handle_fatal_exception(Throwable $e): void {
+    try {
+        if (db()->inTransaction()) db()->rollBack();
+    } catch (Throwable $ignored) {
+    }
+
+    if ($e instanceof InvalidArgumentException) {
+        error_page($e->getMessage(), 400);
+    }
+
+    error_log((string)$e);
+    if ($e instanceof PDOException && ($e->errorInfo[1] ?? null) === 1062) {
+        error_page('Cette valeur existe déjà (par exemple un email déjà utilisé).', 409);
+    }
+    error_page('Une erreur est survenue. Réessaie dans un instant.', 500);
+}
+
+// The CSRF token is mirrored in a cookie so it survives an expired PHP session
+// (remember-me restores the user, the posted token still matches).
+function csrf_token(): string {
+    if (empty($_SESSION['csrf'])) {
+        $cookie = (string)($_COOKIE['csrf_token'] ?? '');
+        $_SESSION['csrf'] = preg_match('/^[a-f0-9]{64}$/', $cookie) ? $cookie : bin2hex(random_bytes(32));
+    }
+    if (($_COOKIE['csrf_token'] ?? '') !== $_SESSION['csrf'] && !headers_sent()) {
+        setcookie('csrf_token', $_SESSION['csrf'], remember_cookie_options(time() + 60 * 60 * 24 * 30));
+    }
+    return $_SESSION['csrf'];
+}
+function verify_csrf() {
+    $posted = (string)($_POST['csrf'] ?? '');
+    $expected = (string)($_SESSION['csrf'] ?? ($_COOKIE['csrf_token'] ?? ''));
+    if ($expected === '' || !hash_equals($expected, $posted)) {
+        error_page('Ta session a expiré. Reconnecte-toi puis réessaie.', 400);
+    }
+}
+
+// One INFORMATION_SCHEMA query per request; migrations call it with $reset after DDL.
+function db_schema(bool $reset = false): array {
+    static $schema = null;
+    if ($schema !== null && !$reset) return $schema;
+
+    $schema = [];
+    try {
+        $stmt = db()->query('SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE()');
+        foreach ($stmt->fetchAll() as $row) {
+            $schema[strtolower($row['TABLE_NAME'])][strtolower($row['COLUMN_NAME'])] = true;
+        }
+    } catch (Throwable $e) {
+        $schema = [];
+    }
+
+    // If INFORMATION_SCHEMA is unreadable, assume the base schema rather than none.
+    if (!$schema) {
+        $base = [
+            'users' => ['id', 'name', 'email', 'password_hash', 'role', 'created_at'],
+            'athletes' => ['id', 'coach_id', 'user_id', 'first_name', 'last_name', 'email', 'created_at'],
+            'sessions' => ['id', 'athlete_id', 'coach_id', 'date', 'title', 'type', 'description', 'objective', 'warmup', 'main_workout', 'cooldown', 'coach_notes', 'attachment_url', 'external_link', 'created_at', 'updated_at'],
+            'comments' => ['id', 'session_id', 'user_id', 'content', 'created_at'],
+        ];
+        foreach ($base as $table => $columns) {
+            $schema[$table] = array_fill_keys($columns, true);
+        }
+    }
+    return $schema;
+}
+
+function table_has_column(string $table, string $column): bool {
+    return isset(db_schema()[strtolower($table)][strtolower($column)]);
 }
 
 function table_exists(string $table): bool {
-    static $cache = [];
-    if (!empty($cache[$table])) return true;
-
-    try {
-        $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
-        $stmt->execute([$table]);
-        $cache[$table] = (bool)$stmt->fetchColumn();
-    } catch (Throwable $e) {
-        $cache[$table] = false;
-    }
-
-    return $cache[$table];
+    return isset(db_schema()[strtolower($table)]);
 }
 
 function user_role_needs_migration(): bool {
@@ -128,7 +197,24 @@ function add_column_if_missing(string $table, string $column, string $definition
     if (table_has_column($table, $column)) return;
 
     db()->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
+    db_schema(true);
     $applied[] = $table . '.' . $column;
+}
+
+function index_exists(string $table, string $index): bool {
+    $stmt = db()->prepare('SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?');
+    $stmt->execute([$table, $index]);
+    return (int)$stmt->fetchColumn() > 0;
+}
+
+function add_index_if_missing(string $table, string $index, string $columns, array &$applied): void {
+    if (!table_exists($table) || index_exists($table, $index)) return;
+    try {
+        db()->exec('ALTER TABLE ' . $table . ' ADD INDEX ' . $index . ' (' . $columns . ')');
+        $applied[] = $table . '.' . $index;
+    } catch (Throwable $e) {
+        // A missing index only costs speed; never block the other migrations for it.
+    }
 }
 
 function sql_optional(string $table, string $alias, string $column, string $fallback): string {
@@ -213,6 +299,9 @@ function db_update(string $table, array $values, string $where, array $wherePara
 }
 
 function login_user(array $user): void {
+    if (session_status() === PHP_SESSION_ACTIVE && !headers_sent()) {
+        session_regenerate_id(true);
+    }
     $_SESSION['user'] = [
         'id' => (int)$user['id'],
         'name' => $user['name'],
@@ -222,26 +311,36 @@ function login_user(array $user): void {
     ];
 }
 
-// Sessions restored by the old remember-me code stored the auth_tokens id as user id.
-function repair_legacy_session_user(): void {
+// Reloads the session user from the database so deleted or demoted accounts lose access.
+// Sessions without auth_v come from the old remember-me code (token id stored as user id):
+// they are dropped, and remember-me logs the user back in correctly.
+function refresh_session_user(): void {
     $user = current_user();
-    if (!$user || ($user['auth_v'] ?? null) === 2) return;
+    if (!$user) return;
 
-    $stmt = db()->prepare('SELECT id, name, email, role FROM users WHERE email=? LIMIT 1');
-    $stmt->execute([$user['email'] ?? '']);
-    $row = $stmt->fetch();
-    if ($row) {
-        login_user($row);
-    } else {
+    if (($user['auth_v'] ?? null) !== 2) {
         unset($_SESSION['user']);
+        return;
     }
+
+    $stmt = db()->prepare('SELECT id, name, email, role FROM users WHERE id=? LIMIT 1');
+    $stmt->execute([(int)$user['id']]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        unset($_SESSION['user']);
+        return;
+    }
+
+    $_SESSION['user']['name'] = $row['name'];
+    $_SESSION['user']['email'] = $row['email'];
+    $_SESSION['user']['role'] = $row['role'];
 }
 
 function remember_cookie_options(int $expires): array {
     return [
         'expires' => $expires,
         'path' => '/',
-        'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'secure' => is_https(),
         'httponly' => true,
         'samesite' => 'Lax',
     ];
@@ -295,15 +394,98 @@ function restore_remembered_login(): void {
         return;
     }
 
+    // No rotation on use: on flaky mobile networks a lost response would leave the phone
+    // with a dead token and log the athlete out. Tokens are revoked on password change instead.
     login_user(['id' => $token['user_id']] + $token);
+}
+
+function purge_expired_remember_tokens(): void {
+    if (!table_exists('auth_tokens')) return;
+    db()->exec('DELETE FROM auth_tokens WHERE expires_at < NOW()');
 }
 
 function nullable_int($value) {
     return $value === '' || $value === null ? null : (int)$value;
 }
 
+// Accepts the French decimal comma ("4,5") as well as "4.5".
 function nullable_float($value) {
-    return $value === '' || $value === null ? null : (float)$value;
+    if ($value === null) return null;
+    $value = str_replace([',', ' '], ['.', ''], trim((string)$value));
+    return $value === '' || !is_numeric($value) ? null : (float)$value;
+}
+
+function is_https(): bool {
+    return (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
+}
+
+function valid_date(string $date): bool {
+    if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $date, $m)) return false;
+    return checkdate((int)$m[2], (int)$m[3], (int)$m[1]);
+}
+
+function require_valid_date($date): string {
+    $date = (string)$date;
+    if (!valid_date($date)) throw new InvalidArgumentException('Date invalide.');
+    return $date;
+}
+
+// Only http(s) links may be stored, so a javascript: URL can never reach an href.
+function clean_external_link($link): ?string {
+    $link = trim((string)$link);
+    if ($link === '') return null;
+    if (!preg_match('#^https?://#i', $link)) $link = 'https://' . $link;
+    return filter_var($link, FILTER_VALIDATE_URL) ? $link : null;
+}
+
+function validate_password(string $password): void {
+    if (mb_strlen($password) < 8) {
+        throw new InvalidArgumentException('Le mot de passe doit contenir au moins 8 caractères.');
+    }
+}
+
+function email_taken(string $email, int $exceptUserId = 0): bool {
+    $stmt = db()->prepare('SELECT id FROM users WHERE email=? AND id<>? LIMIT 1');
+    $stmt->execute([$email, $exceptUserId]);
+    return (bool)$stmt->fetch();
+}
+
+// Failed logins are counted per email and per IP in login_attempts (created by migrations):
+// 10 failures in 15 minutes block further attempts.
+function login_attempts_ready(): bool {
+    return table_exists('login_attempts');
+}
+
+function too_many_login_attempts(string $email): bool {
+    if (!login_attempts_ready()) return false;
+    $stmt = db()->prepare(
+        'SELECT
+            SUM(email=?) AS by_email,
+            SUM(ip=?) AS by_ip
+         FROM login_attempts
+         WHERE (email=? OR ip=?) AND attempted_at > (NOW() - INTERVAL 15 MINUTE)'
+    );
+    $stmt->execute([strtolower($email), client_ip(), strtolower($email), client_ip()]);
+    $counts = $stmt->fetch();
+    // A club Wi-Fi or mobile carrier shares one IP between many people: allow far more per IP.
+    return (int)($counts['by_email'] ?? 0) >= 10 || (int)($counts['by_ip'] ?? 0) >= 50;
+}
+
+function record_failed_login(string $email): void {
+    if (!login_attempts_ready()) return;
+    db()->prepare('INSERT INTO login_attempts (email, ip, attempted_at) VALUES (?,?,NOW())')
+        ->execute([strtolower($email), client_ip()]);
+}
+
+function clear_login_attempts(string $email): void {
+    if (!login_attempts_ready()) return;
+    db()->prepare('DELETE FROM login_attempts WHERE email=? OR (ip=? AND email=?) OR attempted_at < (NOW() - INTERVAL 1 DAY)')
+        ->execute([strtolower($email), client_ip(), strtolower($email)]);
+}
+
+function client_ip(): string {
+    return substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45);
 }
 
 function weather_options(): array {
@@ -530,8 +712,7 @@ function normalize_daily_debrief(array $row): array {
 function get_daily_debrief(int $athleteId, string $date): array {
     if (!table_exists('daily_debriefs')) return empty_debrief();
     if (!can_access_athlete($athleteId)) {
-        http_response_code(403);
-        exit('Accès refusé');
+        deny_access();
     }
 
     $stmt = db()->prepare('SELECT * FROM daily_debriefs WHERE athlete_id=? AND date=? LIMIT 1');
@@ -540,7 +721,7 @@ function get_daily_debrief(int $athleteId, string $date): array {
     return $row ? normalize_daily_debrief($row) : empty_debrief();
 }
 
-function attach_daily_debriefs_to_calendar(array $sessionsByDate, int $athleteId, DateTime $start, DateTime $end): array {
+function attach_daily_debriefs_to_calendar(int $athleteId, DateTime $start, DateTime $end): array {
     if (!table_exists('daily_debriefs')) return [];
 
     $stmt = db()->prepare('SELECT * FROM daily_debriefs WHERE athlete_id=? AND date BETWEEN ? AND ?');
@@ -548,9 +729,7 @@ function attach_daily_debriefs_to_calendar(array $sessionsByDate, int $athleteId
 
     $dailyDebriefs = [];
     foreach ($stmt->fetchAll() as $row) {
-        $date = $row['date'];
-        if (!empty($sessionsByDate[$date])) continue;
-        $dailyDebriefs[$date] = normalize_daily_debrief($row);
+        $dailyDebriefs[$row['date']] = normalize_daily_debrief($row);
     }
 
     return $dailyDebriefs;
@@ -602,14 +781,12 @@ function save_session_debrief(array $session, array $post): void {
 
     $user = current_user();
     if (!$user || $user['role'] !== 'athlete') {
-        http_response_code(403);
-        exit('Seul le compte athlète peut modifier le débrief.');
+        error_page('Seul le compte athlète peut modifier le débrief.', 403);
     }
 
     $athlete = athlete_for_user((int)$user['id']);
     if (!$athlete || (int)$athlete['id'] !== (int)$session['athlete_id']) {
-        http_response_code(403);
-        exit('Accès refusé');
+        deny_access();
     }
 
     $payload = parse_debrief_payload($post);
@@ -646,14 +823,12 @@ function save_session_debrief(array $session, array $post): void {
 function assert_athlete_owns_athlete_id(int $athleteId): void {
     $user = current_user();
     if (!$user || $user['role'] !== 'athlete') {
-        http_response_code(403);
-        exit('Seul le compte athlète peut modifier ce retour.');
+        error_page('Seul le compte athlète peut modifier ce retour.', 403);
     }
 
     $athlete = athlete_for_user((int)$user['id']);
     if (!$athlete || (int)$athlete['id'] !== $athleteId) {
-        http_response_code(403);
-        exit('Accès refusé');
+        deny_access();
     }
 }
 
@@ -721,8 +896,7 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
 function create_quick_session(int $athleteId, string $date, string $title, string $description): int {
     $user = current_user();
     if (!$user || !in_array($user['role'], ['coach', 'super_admin'], true) || !can_access_athlete($athleteId)) {
-        http_response_code(403);
-        exit('Accès refusé');
+        deny_access();
     }
     if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
         throw new InvalidArgumentException('Date invalide.');
@@ -781,6 +955,7 @@ function run_pending_migrations(): array {
                     ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+        db_schema(true);
         $applied[] = 'auth_tokens';
     }
 
@@ -799,6 +974,7 @@ function run_pending_migrations(): array {
     // Legacy schemas declare sessions.type as an ENUM, which silently blanks new types like vélo.
     if (table_exists('sessions') && column_data_type('sessions', 'type') === 'enum') {
         db()->exec("ALTER TABLE sessions MODIFY type VARCHAR(64) NULL DEFAULT 'footing'");
+        db_schema(true);
         $applied[] = 'sessions.type';
     }
     if (table_exists('sessions')) {
@@ -839,6 +1015,7 @@ function run_pending_migrations(): array {
                     ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+        db_schema(true);
         $applied[] = 'athlete_paces';
     }
     seed_missing_athlete_paces();
@@ -856,6 +1033,7 @@ function run_pending_migrations(): array {
                     ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+        db_schema(true);
         $applied[] = 'coach_session_field_settings';
     }
 
@@ -874,6 +1052,7 @@ function run_pending_migrations(): array {
                     ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+        db_schema(true);
         db()->exec(
             'INSERT IGNORE INTO athlete_coaches (athlete_id, coach_id, created_at)
              SELECT id, coach_id, NOW() FROM athletes WHERE coach_id IS NOT NULL'
@@ -903,6 +1082,7 @@ function run_pending_migrations(): array {
                     ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+        db_schema(true);
         $applied[] = 'session_debriefs';
     }
 
@@ -929,8 +1109,33 @@ function run_pending_migrations(): array {
                     ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+        db_schema(true);
         $applied[] = 'daily_debriefs';
     }
+
+    if (!table_exists('login_attempts')) {
+        db()->exec(
+            'CREATE TABLE login_attempts (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                email VARCHAR(190) NOT NULL,
+                ip VARCHAR(45) NOT NULL,
+                attempted_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                KEY idx_login_attempts_email (email, attempted_at),
+                KEY idx_login_attempts_ip (ip, attempted_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        db_schema(true);
+        $applied[] = 'login_attempts';
+    }
+
+    add_index_if_missing('sessions', 'idx_sessions_athlete_date', 'athlete_id, date', $applied);
+    add_index_if_missing('sessions', 'idx_sessions_date', 'date', $applied);
+    add_index_if_missing('comments', 'idx_comments_session', 'session_id, created_at', $applied);
+    add_index_if_missing('athletes', 'idx_athletes_user', 'user_id', $applied);
+    add_index_if_missing('sessions', 'idx_sessions_attachment', 'attachment_url(191)', $applied);
+
+    purge_expired_remember_tokens();
 
     return $applied;
 }
@@ -968,9 +1173,22 @@ function session_types(): array
         'résistance',
         'vélo',
         'natation',
+        'footing',
     ];
 }
-function type_class(string $type): string { return 'type-' . str_replace([' ', 'é'], ['-', 'e'], $type); }
+// Class names are restricted to [a-z0-9-] so a stored type can never break out of the attribute.
+function type_class(string $type): string {
+    $slug = strtolower(str_replace([' ', 'é', 'è', 'ê', 'à'], ['-', 'e', 'e', 'e', 'a'], $type));
+    return 'type-' . preg_replace('/[^a-z0-9-]/', '', $slug);
+}
+
+// Keeps a legacy stored value valid on edit while rejecting anything else.
+function allowed_value($value, array $allowed, string $default, $current = null): string {
+    $value = (string)$value;
+    if (in_array($value, $allowed, true)) return $value;
+    if ($current !== null && $value === (string)$current) return $value;
+    return $default;
+}
 
 // Vélo and natation volumes are tracked apart; this ratio converts them to running km.
 function session_sport_ratios(): array {
@@ -996,8 +1214,18 @@ function run_equivalent_sql(string $distanceExpr, string $typeColumn = 'type'): 
     return '(CASE' . $cases . ' ELSE ' . $distanceExpr . ' END)';
 }
 
+// Real km: the athlete's debrief first, then the coach's "réalisé", then the planned km.
 function session_volume(array $session): float {
+    $debriefKm = $session['debrief']['actual_distance_km'] ?? null;
+    if ($debriefKm !== null && $debriefKm !== '') return (float)$debriefKm;
     return (float)($session['actual_distance_km'] ?: ($session['planned_distance_km'] ?: 0));
+}
+
+function session_actual_distance(array $session, array $debrief) {
+    if (($debrief['actual_distance_km'] ?? null) !== null && $debrief['actual_distance_km'] !== '') {
+        return $debrief['actual_distance_km'];
+    }
+    return $session['actual_distance_km'] ?? null;
 }
 
 // Coaches land on the general calendar after editing a session; athletes keep their own.
@@ -1011,7 +1239,7 @@ function session_calendar_url(int $athleteId, string $month = ''): string {
 }
 
 function month_start($month): DateTime {
-    if ($month && preg_match('/^\d{4}-\d{2}$/', $month)) return new DateTime($month . '-01');
+    if (is_string($month) && preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $month)) return new DateTime($month . '-01');
     return new DateTime(date('Y-m-01'));
 }
 
@@ -1102,20 +1330,10 @@ function ensure_configured_super_admin(): bool {
     $stmt->execute([$email]);
     $existing = $stmt->fetch();
 
+    // An existing account keeps its own password (changed on "Mon compte"); only the role is enforced.
     if ($existing) {
-        if (
-            $existing['name'] === ($name ?: 'Super Admin')
-            && $existing['role'] === 'super_admin'
-            && password_verify($password, (string)$existing['password_hash'])
-        ) {
-            return false;
-        }
-
-        db_update('users', [
-            'name' => $name ?: 'Super Admin',
-            'password_hash' => password_hash($password, PASSWORD_BCRYPT),
-            'role' => 'super_admin',
-        ], 'id=?', [(int)$existing['id']]);
+        if ($existing['role'] === 'super_admin') return false;
+        db()->prepare('UPDATE users SET role="super_admin" WHERE id=?')->execute([(int)$existing['id']]);
     } else {
         db_insert('users', [
             'name' => $name ?: 'Super Admin',
@@ -1128,8 +1346,11 @@ function ensure_configured_super_admin(): bool {
     return true;
 }
 
-function bootstrap_configured_super_admin(): void {
+// Called only when someone tries to log in with the configured super admin email,
+// so the bcrypt check no longer runs on every page.
+function bootstrap_configured_super_admin(string $loginEmail): void {
     if (!defined('SUPER_ADMIN_EMAIL') || !defined('SUPER_ADMIN_PASSWORD')) return;
+    if (strcasecmp(trim($loginEmail), trim((string)SUPER_ADMIN_EMAIL)) !== 0) return;
 
     try {
         if (user_role_needs_migration()) {
@@ -1163,35 +1384,89 @@ function get_session_checked(int $sessionId): array {
     );
     $stmt->execute([$sessionId]);
     $session = $stmt->fetch();
-    if (!$session || !can_access_athlete((int)$session['athlete_id'])) { http_response_code(404); exit('Séance introuvable'); }
+    if (!$session || !can_access_athlete((int)$session['athlete_id'])) error_page('Séance introuvable', 404);
     return $session;
 }
 
 function upload_attachment() {
-    if (empty($_FILES['attachment']['name'])) return null;
-    if ($_FILES['attachment']['error'] !== UPLOAD_ERR_OK) return null;
+    if (empty($_FILES['attachment']['name']) || ($_FILES['attachment']['error'] ?? null) === UPLOAD_ERR_NO_FILE) return null;
+    if ($_FILES['attachment']['error'] !== UPLOAD_ERR_OK) {
+        throw new InvalidArgumentException("La pièce jointe n'a pas pu être envoyée (fichier trop lourd ?).");
+    }
+    if ($_FILES['attachment']['size'] > 10 * 1024 * 1024) {
+        throw new InvalidArgumentException('La pièce jointe dépasse 10 Mo.');
+    }
     $allowed = ['pdf','jpg','jpeg','png','webp','doc','docx'];
     $ext = strtolower(pathinfo($_FILES['attachment']['name'], PATHINFO_EXTENSION));
-    if (!in_array($ext, $allowed, true)) return null;
-    if (!is_dir(__DIR__ . '/uploads')) mkdir(__DIR__ . '/uploads', 0755, true);
+    if (!in_array($ext, $allowed, true)) {
+        throw new InvalidArgumentException('Format de pièce jointe non accepté (PDF, image, Word).');
+    }
+    $dir = __DIR__ . '/uploads';
+    if (!is_dir($dir)) mkdir($dir, 0755, true);
     $name = bin2hex(random_bytes(12)) . '.' . $ext;
-    move_uploaded_file($_FILES['attachment']['tmp_name'], __DIR__ . '/uploads/' . $name);
+    if (!move_uploaded_file($_FILES['attachment']['tmp_name'], $dir . '/' . $name)) {
+        throw new RuntimeException("La pièce jointe n'a pas pu être enregistrée.");
+    }
     return 'uploads/' . $name;
+}
+
+// Deletes the athlete with everything attached: sessions, comments, debriefs, login account
+// and attachment files. The base tables may lack ON DELETE CASCADE, so rows are removed explicitly.
+function delete_athlete_completely(int $athleteId): void {
+    $stmt = db()->prepare('SELECT id, user_id FROM athletes WHERE id=?');
+    $stmt->execute([$athleteId]);
+    $athlete = $stmt->fetch();
+    if (!$athlete) return;
+
+    $stmt = db()->prepare('SELECT DISTINCT attachment_url FROM sessions WHERE athlete_id=? AND attachment_url IS NOT NULL AND attachment_url<>""');
+    $stmt->execute([$athleteId]);
+    $attachments = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+    db()->beginTransaction();
+    $sessionIds = 'SELECT id FROM sessions WHERE athlete_id=?';
+    db()->prepare('DELETE FROM comments WHERE session_id IN (' . $sessionIds . ')')->execute([$athleteId]);
+    if (table_exists('session_debriefs')) {
+        db()->prepare('DELETE FROM session_debriefs WHERE session_id IN (' . $sessionIds . ')')->execute([$athleteId]);
+    }
+    db()->prepare('DELETE FROM sessions WHERE athlete_id=?')->execute([$athleteId]);
+    db()->prepare('DELETE FROM athletes WHERE id=?')->execute([$athleteId]);
+    if (!empty($athlete['user_id'])) {
+        if (table_exists('auth_tokens')) {
+            db()->prepare('DELETE FROM auth_tokens WHERE user_id=?')->execute([(int)$athlete['user_id']]);
+        }
+        db()->prepare('DELETE FROM comments WHERE user_id=?')->execute([(int)$athlete['user_id']]);
+        db()->prepare('DELETE FROM users WHERE id=? AND role="athlete"')->execute([(int)$athlete['user_id']]);
+    }
+    db()->commit();
+
+    foreach ($attachments as $path) {
+        delete_attachment_if_unused($path);
+    }
+}
+
+// Removes an uploaded file once no session references it anymore (duplicates share files).
+function delete_attachment_if_unused(?string $path): void {
+    if (!$path || strpos($path, 'uploads/') !== 0 || strpos($path, '..') !== false) return;
+    $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE attachment_url=?');
+    $stmt->execute([$path]);
+    if ((int)$stmt->fetchColumn() > 0) return;
+    $file = __DIR__ . '/' . $path;
+    if (is_file($file)) @unlink($file);
 }
 
 function session_statuses(): array {
     return [
-        'planned' => 'Planifiee',
-        'done' => 'Realisee',
-        'missed' => 'Manquee',
-        'cancelled' => 'Annulee',
+        'planned' => 'Planifiée',
+        'done' => 'Réalisée',
+        'missed' => 'Manquée',
+        'cancelled' => 'Annulée',
     ];
 }
 
 function intensities(): array {
     return [
         'low' => 'Faible',
-        'moderate' => 'Moderee',
+        'moderate' => 'Modérée',
         'high' => 'Forte',
         'max' => 'Maximale',
     ];
@@ -1272,6 +1547,40 @@ function format_short_date($date): string {
 function format_full_date($date): string {
     if (!$date) return '-';
     return (new DateTime($date))->format('d/m/Y');
+}
+
+function french_month_names(): array {
+    return ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+}
+
+function format_month_label(DateTime $month): string {
+    return ucfirst(french_month_names()[(int)$month->format('n') - 1]) . ' ' . $month->format('Y');
+}
+
+function format_long_date($date): string {
+    if (!$date) return '-';
+    $days = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
+    $d = new DateTime($date);
+    return ucfirst($days[(int)$d->format('N') - 1]) . ' ' . $d->format('j') . ' ' . french_month_names()[(int)$d->format('n') - 1] . ' ' . $d->format('Y');
+}
+
+function format_datetime($datetime): string {
+    if (!$datetime) return '-';
+    return (new DateTime($datetime))->format('d/m/Y à H:i');
+}
+
+function athlete_initials($firstName, $lastName): string {
+    return mb_strtoupper(mb_substr((string)$firstName, 0, 1) . mb_substr((string)$lastName, 0, 1));
+}
+
+function weather_read_html(array $weatherKeys): void {
+    if (!$weatherKeys) return;
+    echo '<div class="weather-read">';
+    foreach ($weatherKeys as $key) {
+        $weather = weather_options()[$key] ?? null;
+        if ($weather) echo '<span>' . e($weather['icon']) . ' ' . e($weather['label']) . '</span>';
+    }
+    echo '</div>';
 }
 
 function relative_day_label($date): string {

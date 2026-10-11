@@ -1,1 +1,15 @@
 DirectoryIndex index.php
+Options -Indexes
+
+# Source, schema and config files are never served directly.
+<FilesMatch "(\.(sql|md|log|bak|swp|dist|lock|ini|sh)|~|^config\.example\.php|^functions\.php)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)\.(git|env|idea|vscode)(/|$) - [F,L]
+    RewriteRule ^migrations/ - [F,L]
+    # Uploaded files are documents only: never run a script from uploads/.
+    RewriteRule ^uploads/.*\.(php\d?|phtml|phar|cgi|pl|py)$ - [F,L,NC]
+</IfModule>

@@ -167,6 +167,7 @@ p{
     background:rgba(255,255,255,.94);
     border-bottom:1px solid var(--line);
     box-shadow:0 8px 24px rgba(19,32,28,.05);
+    -webkit-backdrop-filter:blur(14px);
     backdrop-filter:blur(14px)
 }
 
@@ -507,7 +508,7 @@ p{
 }
 
 .btn.small{
-    min-height:34px;
+    min-height:40px;
     padding:8px 11px;
     font-size:13px
 }
@@ -767,7 +768,7 @@ p{
 }
 
 .day.muted{
-    opacity:.42
+    opacity:.62
 }
 
 .day-num{
@@ -831,7 +832,7 @@ p{
     border:1px dashed transparent;
     border-radius:11px;
     background:transparent;
-    color:#9aa9a2;
+    color:#5f716a;
     font-size:17px;
     font-weight:900;
     text-align:center;
@@ -899,10 +900,10 @@ p{
 .type-fractionne{background:var(--red)}
 .type-sortie-longue{background:#ea580c}
 .type-renforcement{background:var(--violet)}
-.type-recuperation{background:var(--green)}
+.type-recuperation{background:#15803d}
 .type-competition{background:#111827}
 .type-repos{background:#6b7280}
-.type-technique{background:#0891b2}
+.type-technique{background:#0e7490}
 .type-specifique,
 .type-speciale,
 .type-seance-specifique,
@@ -910,13 +911,13 @@ p{
 .type-vma{background:#be123c}
 .type-seuil{background:#9333ea}
 .type-endurance{background:#1d4ed8}
-.type-mobilite{background:#ca8a04}
+.type-mobilite{background:#a16207}
 .type-ppg{background:#4f46e5}
 .type-resistance-aerobie,
 .type-resistance{background:#b45309}
-.type-aerobie{background:#0284c7}
+.type-aerobie{background:#075985}
 .type-volume{background:#0369a1}
-.type-velo{background:#65a30d}
+.type-velo{background:#4d7c0f}
 .type-natation{background:#0e7490}
 .type-autre{background:#475569}
 
@@ -967,8 +968,7 @@ p{
     font-weight:950
 }
 
-.difficulty-choice input:checked + span,
-.difficulty-choice.selected span{
+.difficulty-choice input:checked + span{
     border-color:var(--primary);
     background:var(--primary);
     color:#fff
@@ -1017,7 +1017,6 @@ p{
     font-size:13px
 }
 
-.weather-choice.selected,
 .weather-choice:has(input:checked){
     border-color:var(--primary);
     background:#f2fbf8
@@ -1305,7 +1304,7 @@ p{
 @media print{
     :root{--shadow:none;--shadow-sm:none;--shadow-focus:none}
     body{background:#fff;color:#000;font-size:11pt}
-    .topbar,.btn,.empty-day-action,.day-add-link,form .actions{display:none!important}
+    .topbar,.btn:not(.keep-print),.empty-day-action,.day-add-link,form,.back-link{display:none!important}
     .container{width:100%;max-width:none;padding:0}
     .card,.stat-card,.metric-box,.pace-cell,.focus-strip,.athlete-next{break-inside:avoid;box-shadow:none;border-color:#bbb;background:#fff;color:#000}
     .focus-strip p,.athlete-next p,.eyebrow{color:#333}
@@ -1316,4 +1315,41 @@ p{
     .session-pill{color:#000!important;background:#fff!important;border-color:#777!important;overflow:visible}
     .session-title{white-space:normal;overflow:visible;text-overflow:clip}
     a{color:inherit;text-decoration:underline}
+}
+
+/* Audit fixes: iOS zoom, small screens, readability */
+.field input,.field textarea,.field select,.search{font-size:16px}
+.field input[type="date"]{min-width:0;-webkit-appearance:none;appearance:none}
+.auth-body{min-height:100vh;min-height:100dvh}
+
+.session-initials{display:none;font-size:10px;font-weight:950;opacity:.95}
+.coach-calendar .session-initials{display:block}
+
+.pace-card > summary{cursor:pointer;list-style:none}
+.pace-card > summary::-webkit-details-marker{display:none}
+.pace-card > summary h2{display:inline;margin:0}
+.pace-card > summary::after{content:" ▾";color:var(--muted)}
+.pace-card[open] > summary::after{content:" ▴"}
+.pace-card[open] > summary{margin-bottom:12px}
+
+.back-link{display:inline-block;margin:0 0 10px;color:var(--primary-dark);font-weight:800;text-decoration:none}
+.back-link:hover{text-decoration:underline}
+.error-card{max-width:560px;margin:40px auto}
+.narrow-card{max-width:560px}
+
+@media(max-width:819px){
+    .topbar{position:static}
+}
+
+@media(max-width:380px){
+    .week-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+@media(min-width:820px){
+    .coach-calendar .session-initials{display:none}
+}
+
+/* iOS < 15.4 has no :has(): fall back to the server-rendered class. */
+@supports not selector(:has(*)){
+    .weather-choice.selected{border-color:var(--primary);background:#f2fbf8}
 }

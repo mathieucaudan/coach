@@ -1,33 +1,36 @@
 <?php
-$debugEnabled = isset($_GET['debug']) && $_GET['debug'] === '1';
-if ($debugEnabled) {
-    ini_set('display_errors', '1');
-    ini_set('display_startup_errors', '1');
-    error_reporting(E_ALL);
-    register_shutdown_function(function () {
-        $error = error_get_last();
-        if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
-            http_response_code(500);
-            echo '<pre style="white-space:pre-wrap;overflow:auto;background:#111827;color:#f8fafc;padding:16px;margin:0">';
-            echo htmlspecialchars($error['message'] . "\n" . $error['file'] . ':' . $error['line'], ENT_QUOTES, 'UTF-8');
-            echo '</pre>';
-        }
-    });
-}
-
-session_start();
 require_once __DIR__ . '/functions.php';
-bootstrap_configured_super_admin();
-repair_legacy_session_user();
+
+ini_set('session.use_strict_mode', '1');
+ini_set('session.gc_maxlifetime', (string)(60 * 60 * 8));
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path' => '/',
+    'secure' => is_https(),
+    'httponly' => true,
+    'samesite' => 'Lax',
+]);
+session_start();
+
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: same-origin');
+
+// Errors while rendering pages get the same friendly page as actions, and are logged.
+set_exception_handler(function (Throwable $e) {
+    handle_fatal_exception($e);
+});
+
+refresh_session_user();
 restore_remembered_login();
+// Issued before any output so the CSRF cookie can still be set.
+csrf_token();
 
 $page = $_GET['page'] ?? 'home';
 $action = $_POST['action'] ?? null;
 
-if ($page === 'logout') {
-    logout_user();
-    redirect('index.php?page=login');
-}
+// Logout only goes through the CSRF-protected "logout" action.
+if ($page === 'logout') redirect('index.php');
 
 try {
 if ($action) {
@@ -35,18 +38,38 @@ if ($action) {
     $user = current_user();
 
     if ($action === 'login') {
+        $email = trim((string)($_POST['email'] ?? ''));
+        if (too_many_login_attempts($email)) {
+            $_SESSION['error'] = 'Trop de tentatives. Réessaie dans 15 minutes.';
+            redirect('index.php?page=login');
+        }
+
+        try {
+            bootstrap_configured_super_admin($email);
+        } catch (Throwable $e) {
+            error_log((string)$e);
+        }
+
         $stmt = db()->prepare('SELECT * FROM users WHERE email = ? LIMIT 1');
-        $stmt->execute([trim($_POST['email'] ?? '')]);
+        $stmt->execute([$email]);
         $u = $stmt->fetch();
 
-        if ($u && password_verify($_POST['password'] ?? '', $u['password_hash'])) {
+        // Unknown emails still pay for a bcrypt check so timing does not reveal accounts.
+        $hash = $u ? (string)$u['password_hash'] : password_hash('timing-placeholder', PASSWORD_BCRYPT);
+        if (password_verify((string)($_POST['password'] ?? ''), $hash) && $u) {
+            clear_login_attempts($email);
+            purge_expired_remember_tokens();
             login_user($u);
+            $_SESSION['csrf'] = bin2hex(random_bytes(32));
             if (!empty($_POST['remember'])) {
                 remember_user((int)$u['id']);
             }
-            redirect('index.php');
+            $next = (string)($_SESSION['after_login'] ?? '');
+            unset($_SESSION['after_login']);
+            redirect(preg_match('/^index\.php\?page=[a-z_]+/', $next) ? $next : 'index.php');
         }
 
+        record_failed_login($email);
         $_SESSION['error'] = 'Identifiants incorrects.';
         redirect('index.php?page=login');
     }
@@ -58,15 +81,56 @@ if ($action) {
 
     require_login();
 
+    if ($action === 'change_password') {
+        $stmt = db()->prepare('SELECT password_hash FROM users WHERE id=?');
+        $stmt->execute([(int)$user['id']]);
+        $currentHash = (string)$stmt->fetchColumn();
+        if (!password_verify((string)($_POST['current_password'] ?? ''), $currentHash)) {
+            throw new InvalidArgumentException('Mot de passe actuel incorrect.');
+        }
+        $newPassword = (string)($_POST['new_password'] ?? '');
+        validate_password($newPassword);
+        if ($newPassword !== (string)($_POST['confirm_password'] ?? '')) {
+            throw new InvalidArgumentException('Les deux nouveaux mots de passe ne correspondent pas.');
+        }
+
+        db()->prepare('UPDATE users SET password_hash=? WHERE id=?')
+            ->execute([password_hash($newPassword, PASSWORD_BCRYPT), (int)$user['id']]);
+        // Every remembered device must log in again with the new password.
+        if (table_exists('auth_tokens')) {
+            db()->prepare('DELETE FROM auth_tokens WHERE user_id=?')->execute([(int)$user['id']]);
+        }
+        clear_remember_token();
+        session_regenerate_id(true);
+
+        $_SESSION['success'] = 'Mot de passe modifié.';
+        redirect('index.php?page=account');
+    }
+
+    if ($action === 'run_migrations') {
+        require_role('super_admin');
+        try {
+            $_SESSION['migration_result'] = ['applied' => run_pending_migrations(), 'error' => null];
+        } catch (Throwable $e) {
+            error_log((string)$e);
+            $_SESSION['migration_result'] = ['applied' => [], 'error' => $e->getMessage()];
+        }
+        redirect('index.php?page=run_migrations');
+    }
+
     if ($action === 'create_coach') {
         require_role('super_admin');
 
         $name = trim($_POST['name'] ?? '');
         $email = trim($_POST['email'] ?? '');
-        $password = $_POST['password'] ?: 'password123';
+        $password = (string)($_POST['password'] ?? '');
 
         if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             throw new InvalidArgumentException('Nom ou email invalide.');
+        }
+        validate_password($password);
+        if (email_taken($email)) {
+            throw new InvalidArgumentException('Un compte existe déjà avec cet email.');
         }
 
         $stmt = db()->prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,"coach")');
@@ -102,13 +166,22 @@ if ($action) {
             }
         }
 
-        $hash = password_hash($_POST['password'] ?: 'password123', PASSWORD_BCRYPT);
+        $email = trim((string)($_POST['email'] ?? ''));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException('Email invalide.');
+        }
+        if (email_taken($email)) {
+            throw new InvalidArgumentException('Un compte existe déjà avec cet email.');
+        }
+        $password = (string)($_POST['password'] ?? '');
+        validate_password($password);
+        $hash = password_hash($password, PASSWORD_BCRYPT);
         $name = trim($_POST['first_name'].' '.$_POST['last_name']);
 
         db()->beginTransaction();
 
         $stmt = db()->prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,"athlete")');
-        $stmt->execute([$name, trim($_POST['email']), $hash]);
+        $stmt->execute([$name, $email, $hash]);
 
         $userId = (int)db()->lastInsertId();
 
@@ -117,11 +190,11 @@ if ($action) {
             'user_id' => $userId,
             'first_name' => trim($_POST['first_name']),
             'last_name' => trim($_POST['last_name']),
-            'email' => trim($_POST['email']),
+            'email' => $email,
             'sport' => trim($_POST['sport'] ?? 'Course'),
-            'level' => trim($_POST['level'] ?? 'Intermediaire'),
+            'level' => trim($_POST['level'] ?? 'Intermédiaire'),
             'goal' => trim($_POST['goal'] ?? ''),
-            'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
+            'vma' => max(5, min(30, nullable_float($_POST['vma'] ?? null) ?? 15)),
             'notes' => trim($_POST['notes'] ?? '')
         ]);
         sync_athlete_coaches($athleteId, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
@@ -130,6 +203,7 @@ if ($action) {
 
         db()->commit();
 
+        $_SESSION['success'] = 'Athlète créé.';
         redirect('index.php?page=dashboard');
     }
 
@@ -138,7 +212,7 @@ if ($action) {
 
         $id = (int)$_POST['id'];
 
-        if (!can_access_athlete($id)) exit('Accès refusé');
+        if (!can_access_athlete($id)) deny_access();
 
         $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
         $stmt->execute([$id]);
@@ -153,29 +227,51 @@ if ($action) {
             }
         }
 
+        // A secondary coach may edit the training profile, but not who coaches the athlete
+        // nor the email the athlete logs in with.
+        $canManageAccess = $user['role'] === 'super_admin' || (int)$athleteToUpdate['coach_id'] === (int)$user['id'];
+        $email = $canManageAccess ? trim((string)($_POST['email'] ?? '')) : (string)$athleteToUpdate['email'];
+        if ($canManageAccess && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException('Email invalide.');
+        }
+        if ($email !== $athleteToUpdate['email'] && email_taken($email, (int)$athleteToUpdate['user_id'])) {
+            throw new InvalidArgumentException('Un compte existe déjà avec cet email.');
+        }
+        if ($canManageAccess) {
+            $secondaryCoachId = nullable_int($_POST['secondary_coach_id'] ?? null);
+        } else {
+            $secondaryCoachId = null;
+            foreach (get_coaches_for_athlete($id) as $coach) {
+                if ((int)$coach['id'] !== $primaryCoachId) $secondaryCoachId = (int)$coach['id'];
+            }
+        }
+
+        db()->beginTransaction();
         db_update('athletes', [
             'coach_id' => $primaryCoachId,
             'first_name' => trim($_POST['first_name']),
             'last_name' => trim($_POST['last_name']),
-            'email' => trim($_POST['email']),
+            'email' => $email,
             'sport' => trim($_POST['sport'] ?? 'Course'),
-            'level' => trim($_POST['level'] ?? 'Intermediaire'),
+            'level' => trim($_POST['level'] ?? 'Intermédiaire'),
             'goal' => trim($_POST['goal'] ?? ''),
-            'vma' => max(5, min(30, (float)($_POST['vma'] ?? 15))),
+            'vma' => max(5, min(30, nullable_float($_POST['vma'] ?? null) ?? 15)),
             'notes' => trim($_POST['notes'] ?? '')
         ], 'id=?', [$id]);
-        sync_athlete_coaches($id, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
+        sync_athlete_coaches($id, $primaryCoachId, $secondaryCoachId);
         sync_athlete_paces($id, $_POST['paces'] ?? []);
         ensure_athlete_paces($id);
 
         $stmt = db()->prepare('UPDATE users u JOIN athletes a ON a.user_id=u.id SET u.name=?, u.email=? WHERE a.id=?');
         $stmt->execute([
             trim($_POST['first_name'].' '.$_POST['last_name']),
-            trim($_POST['email']),
+            $email,
             $id
         ]);
+        db()->commit();
 
-        redirect('index.php?page=dashboard');
+        $_SESSION['success'] = 'Profil enregistré.';
+        redirect('index.php?page=calendar&athlete_id=' . $id);
     }
 
     if ($action === 'delete_athlete') {
@@ -183,18 +279,13 @@ if ($action) {
 
         $id = (int)$_POST['id'];
 
-        if (!can_access_athlete($id)) exit('Accès refusé');
+        if (!can_access_athlete($id)) deny_access();
 
-        if ($user['role'] !== 'super_admin' && !is_primary_coach_for_athlete($id, (int)$user['id'])) exit('Seul le coach principal peut supprimer cet athlète.');
+        if ($user['role'] !== 'super_admin' && !is_primary_coach_for_athlete($id, (int)$user['id'])) error_page('Seul le coach principal peut supprimer cet athlète.', 403);
 
-        if ($user['role'] === 'super_admin') {
-            $stmt = db()->prepare('DELETE FROM athletes WHERE id=?');
-            $stmt->execute([$id]);
-        } else {
-            $stmt = db()->prepare('DELETE FROM athletes WHERE id=? AND coach_id=?');
-            $stmt->execute([$id, $user['id']]);
-        }
+        delete_athlete_completely($id);
 
+        $_SESSION['success'] = 'Athlète supprimé.';
         redirect('index.php?page=dashboard');
     }
 
@@ -203,7 +294,21 @@ if ($action) {
 
         $athleteId = (int)$_POST['athlete_id'];
 
-        if (!can_access_athlete($athleteId)) exit('Accès refusé');
+        if (!can_access_athlete($athleteId)) deny_access();
+
+        $existingSession = !empty($_POST['id']) ? get_session_checked((int)$_POST['id']) : null;
+        if ($existingSession && (int)$existingSession['athlete_id'] !== $athleteId) deny_access();
+        $sessionDate = require_valid_date($_POST['date'] ?? '');
+        $sessionTitle = trim((string)($_POST['title'] ?? ''));
+        if ($sessionTitle === '') throw new InvalidArgumentException('Le titre est obligatoire.');
+        $sessionType = allowed_value($_POST['type'] ?? '', session_types(), session_types()[0], $existingSession['type'] ?? null);
+        $sessionStatus = allowed_value($_POST['status'] ?? '', array_keys(session_statuses()), 'planned');
+        $sessionIntensity = allowed_value($_POST['intensity'] ?? '', array_keys(intensities()), 'moderate');
+        $feeling = nullable_int($_POST['feeling'] ?? null);
+        $pain = nullable_int($_POST['pain'] ?? null);
+        $feeling = $feeling === null ? null : max(1, min(10, $feeling));
+        $pain = $pain === null ? null : max(0, min(10, $pain));
+        $externalLink = clean_external_link($_POST['external_link'] ?? '');
 
         $attachment = upload_attachment();
         $targetPaceCode = trim((string)($_POST['target_pace_code'] ?? ''));
@@ -216,64 +321,69 @@ if ($action) {
         $plannedDistance = $plannedDistance === null ? null : max(0, $plannedDistance);
         $actualDistance = $actualDistance === null ? null : max(0, $actualDistance);
 
-        if (!empty($_POST['id'])) {
-            $session = get_session_checked((int)$_POST['id']);
-            $attachment = $attachment ?: $session['attachment_url'];
+        if ($existingSession) {
+            $session = $existingSession;
+            $previousAttachment = $session['attachment_url'];
+            $attachment = $attachment ?: $previousAttachment;
 
             db_update('sessions', [
-                'date' => $_POST['date'],
-                'title' => $_POST['title'],
-                'type' => $_POST['type'],
-                'status' => $_POST['status'] ?? 'planned',
-                'intensity' => $_POST['intensity'] ?? 'moderate',
+                'date' => $sessionDate,
+                'title' => $sessionTitle,
+                'type' => $sessionType,
+                'status' => $sessionStatus,
+                'intensity' => $sessionIntensity,
                 'duration_min' => nullable_int($_POST['duration_min'] ?? null),
                 'planned_distance_km' => $plannedDistance,
                 'actual_distance_km' => $actualDistance,
                 'target_pace_code' => $targetPaceCode ?: null,
                 'vma_percent' => $targetPacePercent,
-                'description' => $_POST['description'],
+                'description' => $_POST['description'] ?? '',
                 'objective' => '',
                 'warmup' => $_POST['warmup'] ?? '',
                 'main_workout' => $_POST['main_workout'] ?? '',
                 'cooldown' => '',
                 'coach_notes' => $_POST['coach_notes'] ?? '',
                 'actual_duration_min' => nullable_int($_POST['actual_duration_min'] ?? null),
-                'feeling' => nullable_int($_POST['feeling'] ?? null),
-                'pain' => nullable_int($_POST['pain'] ?? null),
+                'feeling' => $feeling,
+                'pain' => $pain,
                 'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
                 'attachment_url' => $attachment,
-                'external_link' => ($_POST['external_link'] ?? '') ?: null
-            ], 'id=?', [(int)$_POST['id']]);
+                'external_link' => $externalLink
+            ], 'id=?', [(int)$session['id']]);
+            if ($previousAttachment && $previousAttachment !== $attachment) {
+                delete_attachment_if_unused($previousAttachment);
+            }
         } else {
             db_insert('sessions', [
                 'athlete_id' => $athleteId,
                 'coach_id' => $user['id'],
-                'date' => $_POST['date'],
-                'title' => $_POST['title'],
-                'type' => $_POST['type'],
-                'status' => $_POST['status'] ?? 'planned',
-                'intensity' => $_POST['intensity'] ?? 'moderate',
+                'date' => $sessionDate,
+                'title' => $sessionTitle,
+                'type' => $sessionType,
+                'status' => $sessionStatus,
+                'intensity' => $sessionIntensity,
                 'duration_min' => nullable_int($_POST['duration_min'] ?? null),
                 'planned_distance_km' => $plannedDistance,
                 'actual_distance_km' => $actualDistance,
                 'target_pace_code' => $targetPaceCode ?: null,
                 'vma_percent' => $targetPacePercent,
-                'description' => $_POST['description'],
+                'description' => $_POST['description'] ?? '',
                 'objective' => '',
                 'warmup' => $_POST['warmup'] ?? '',
                 'main_workout' => $_POST['main_workout'] ?? '',
                 'cooldown' => '',
                 'coach_notes' => $_POST['coach_notes'] ?? '',
                 'actual_duration_min' => nullable_int($_POST['actual_duration_min'] ?? null),
-                'feeling' => nullable_int($_POST['feeling'] ?? null),
-                'pain' => nullable_int($_POST['pain'] ?? null),
+                'feeling' => $feeling,
+                'pain' => $pain,
                 'athlete_feedback' => $_POST['athlete_feedback'] ?? '',
                 'attachment_url' => $attachment,
-                'external_link' => ($_POST['external_link'] ?? '') ?: null
+                'external_link' => $externalLink
             ]);
         }
 
-        redirect(session_calendar_url($athleteId, substr($_POST['date'], 0, 7)));
+        $_SESSION['success'] = 'Séance enregistrée.';
+        redirect(session_calendar_url($athleteId, substr($sessionDate, 0, 7)));
     }
 
     if ($action === 'delete_session') {
@@ -282,7 +392,9 @@ if ($action) {
         $s = get_session_checked((int)$_POST['id']);
 
         db()->prepare('DELETE FROM sessions WHERE id=?')->execute([$s['id']]);
+        delete_attachment_if_unused($s['attachment_url']);
 
+        $_SESSION['success'] = 'Séance supprimée.';
         redirect(session_calendar_url((int)$s['athlete_id'], substr($s['date'], 0, 7)));
     }
 
@@ -290,19 +402,20 @@ if ($action) {
         require_role('coach');
 
         $s = get_session_checked((int)$_POST['id']);
-        $date = $_POST['new_date'];
+        $date = require_valid_date($_POST['new_date'] ?? '');
 
+        // The copy is a new planned session: the athlete's results stay on the original.
         db_insert('sessions', [
             'athlete_id' => $s['athlete_id'],
             'coach_id' => $user['id'],
             'date' => $date,
             'title' => $s['title'],
             'type' => $s['type'],
-            'status' => $s['status'],
+            'status' => 'planned',
             'intensity' => $s['intensity'],
             'duration_min' => $s['duration_min'],
             'planned_distance_km' => $s['planned_distance_km'],
-            'actual_distance_km' => $s['actual_distance_km'],
+            'actual_distance_km' => null,
             'target_pace_code' => $s['target_pace_code'],
             'vma_percent' => $s['vma_percent'],
             'description' => $s['description'],
@@ -311,14 +424,15 @@ if ($action) {
             'main_workout' => $s['main_workout'],
             'cooldown' => $s['cooldown'],
             'coach_notes' => $s['coach_notes'],
-            'actual_duration_min' => $s['actual_duration_min'],
-            'feeling' => $s['feeling'],
-            'pain' => $s['pain'],
-            'athlete_feedback' => $s['athlete_feedback'],
+            'actual_duration_min' => null,
+            'feeling' => null,
+            'pain' => null,
+            'athlete_feedback' => '',
             'attachment_url' => $s['attachment_url'],
             'external_link' => $s['external_link'],
         ]);
 
+        $_SESSION['success'] = 'Séance dupliquée.';
         redirect(session_calendar_url((int)$s['athlete_id'], substr($date, 0, 7)));
     }
 
@@ -326,22 +440,26 @@ if ($action) {
         require_role('coach');
 
         $s = get_session_checked((int)$_POST['id']);
+        $newDate = require_valid_date($_POST['new_date'] ?? '');
 
         db()->prepare('UPDATE sessions SET date=? WHERE id=?')->execute([
-            $_POST['new_date'],
+            $newDate,
             $s['id']
         ]);
 
-        redirect(session_calendar_url((int)$s['athlete_id'], substr($_POST['new_date'], 0, 7)));
+        $_SESSION['success'] = 'Séance déplacée.';
+        redirect(session_calendar_url((int)$s['athlete_id'], substr($newDate, 0, 7)));
     }
 
     if ($action === 'add_comment') {
         $s = get_session_checked((int)$_POST['session_id']);
+        $content = trim((string)($_POST['content'] ?? ''));
+        if ($content === '') throw new InvalidArgumentException('Le commentaire est vide.');
 
         db()->prepare('INSERT INTO comments (session_id,user_id,content) VALUES (?,?,?)')->execute([
             $s['id'],
             $user['id'],
-            trim($_POST['content'])
+            $content
         ]);
 
         redirect('index.php?page=session&id='.$s['id']);
@@ -356,7 +474,7 @@ if ($action) {
 
     if ($action === 'save_daily_debrief') {
         $athleteId = (int)$_POST['athlete_id'];
-        $date = $_POST['date'] ?? '';
+        $date = require_valid_date($_POST['date'] ?? '');
         save_daily_debrief($athleteId, $date, $_POST);
         $_SESSION['success'] = 'Retour journalier enregistré.';
         redirect('index.php?page=daily_debrief&athlete_id='.$athleteId.'&date='.$date);
@@ -372,8 +490,12 @@ if ($action) {
     }
 }
 } catch (Throwable $e) {
-    http_response_code(500);
-    exit('Erreur : ' . e($e->getMessage()));
+    handle_fatal_exception($e);
+}
+
+
+function role_label(string $role): string {
+    return ['super_admin' => 'Admin', 'coach' => 'Coach', 'athlete' => 'Athlète'][$role] ?? $role;
 }
 
 function header_html(string $title) {
@@ -384,16 +506,18 @@ function header_html(string $title) {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title><?=e($title)?> - <?=APP_NAME?></title>
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#0f766e">
+    <title><?=e($title)?> - <?=e(APP_NAME)?></title>
     <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <?php if($u): ?>
 <header class="topbar">
-    <div class="brand"><?=APP_NAME?></div>
+    <div class="brand"><?=e(APP_NAME)?></div>
 
     <nav class="nav">
-        <span class="nav-user"><?=e($u['name'])?> · <?=e($u['role'])?></span>
+        <span class="nav-user"><?=e($u['name'])?> · <?=e(role_label($u['role']))?></span>
 
         <?php if($u['role'] === 'coach' || $u['role'] === 'super_admin'): ?>
             <?php if($u['role'] === 'super_admin'): ?>
@@ -406,11 +530,12 @@ function header_html(string $title) {
         <?php else: ?>
             <a href="index.php">Calendrier</a>
         <?php endif; ?>
+        <a href="index.php?page=account">Mon compte</a>
 
         <form method="post">
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="logout">
-            <button class="btn danger small logout-button" type="submit">Déconnexion</button>
+            <button class="btn secondary small logout-button" type="submit">Déconnexion</button>
         </form>
     </nav>
 </header>
@@ -418,10 +543,32 @@ function header_html(string $title) {
 
 <main class="container">
 <?php
+    $flash = $_SESSION['success'] ?? null;
+    unset($_SESSION['success']);
+    if ($flash): ?>
+    <div class="success-alert" role="status"><?=e($flash)?></div>
+<?php endif;
 }
 
 function footer_html() {
-    echo '</main></body></html>';
+    ?>
+</main>
+<script>
+// Stops a double tap on a slow connection from submitting a form twice.
+document.addEventListener('submit', function (event) {
+    if (event.defaultPrevented) return; // e.g. the user cancelled a confirm()
+    var form = event.target;
+    if (form.dataset.submitted) { event.preventDefault(); return; }
+    form.dataset.submitted = '1';
+    setTimeout(function () { delete form.dataset.submitted; }, 8000);
+});
+// Pages restored by the back button must accept a new submit right away.
+window.addEventListener('pageshow', function () {
+    document.querySelectorAll('form[data-submitted]').forEach(function (form) { delete form.dataset.submitted; });
+});
+</script>
+</body></html>
+<?php
 }
 
 function debrief_form_fields(array $debrief): void {
@@ -433,14 +580,14 @@ function debrief_form_fields(array $debrief): void {
 
     <div class="field">
         <label for="debrief-distance">Volume réalisé (km)</label>
-        <input id="debrief-distance" type="number" name="actual_distance_km" min="0" step="0.01" value="<?=e($debrief['actual_distance_km'] ?? '')?>">
+        <input id="debrief-distance" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" name="actual_distance_km" value="<?=e($debrief['actual_distance_km'] ?? '')?>">
     </div>
 
     <fieldset class="difficulty-field">
         <legend>Difficulté</legend>
-        <div class="difficulty-scale" role="radiogroup" aria-label="Difficulté de 1 à 10">
+        <div class="difficulty-scale">
             <?php for($i = 1; $i <= 10; $i++): ?>
-                <label class="difficulty-choice <?=$debrief['difficulty'] === $i ? 'selected' : ''?>">
+                <label class="difficulty-choice">
                     <input type="radio" name="difficulty" value="<?=$i?>" <?=$debrief['difficulty'] === $i ? 'checked' : ''?>>
                     <span><?=$i?></span>
                 </label>
@@ -459,6 +606,7 @@ function debrief_form_fields(array $debrief): void {
         <div class="weather-options">
             <?php foreach(weather_options() as $key => $weather): ?>
                 <label class="weather-choice <?=in_array($key, $debrief['weather'], true) ? 'selected' : ''?>">
+
                     <input type="checkbox" name="weather[]" value="<?=$key?>" <?=in_array($key, $debrief['weather'], true) ? 'checked' : ''?>>
                     <span aria-hidden="true"><?=e($weather['icon'])?></span>
                     <strong><?=e($weather['label'])?></strong>
@@ -470,7 +618,7 @@ function debrief_form_fields(array $debrief): void {
     <div class="form-grid">
         <div class="field">
             <label for="debrief-temperature">Température (°C)</label>
-            <input id="debrief-temperature" type="number" name="temperature_c" min="-30" max="55" step="0.5" value="<?=e($debrief['temperature_c'] ?? '')?>">
+            <input id="debrief-temperature" type="number" name="temperature_c" min="-30" max="55" step="any" value="<?=e($debrief['temperature_c'] ?? '')?>">
         </div>
 
         <div class="field">
@@ -495,7 +643,7 @@ function athlete_pace_fields(array $paces): void {
                     </div>
                     <div>
                         <label for="pace-percent-<?=$i?>">% VMA</label>
-                        <input id="pace-percent-<?=$i?>" type="number" name="paces[<?=$i?>][percent_vma]" min="40" max="130" step="0.01" value="<?=e($pace['percent_vma'])?>">
+                        <input id="pace-percent-<?=$i?>" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" name="paces[<?=$i?>][percent_vma]" value="<?=e($pace['percent_vma'])?>">
                     </div>
                 </div>
             <?php endforeach; ?>
@@ -508,21 +656,24 @@ function athlete_pace_fields(array $paces): void {
 }
 
 function session_form_field(string $fieldKey, array $session, array $athletePaces): void {
-    if ($fieldKey === 'type'): ?>
+    $fieldId = 'session-' . str_replace('_', '-', $fieldKey);
+    if ($fieldKey === 'type'):
+        $currentType = (string)($session['type'] ?? session_types()[0]);
+        $types = session_types();
+        if ($currentType !== '' && !in_array($currentType, $types, true)) $types[] = $currentType;
+    ?>
         <div class="field">
-            <label>Type</label>
-            <select name="type">
-                <?php foreach(session_types() as $t): ?>
-                    <option <?=$t === ($session['type'] ?? 'footing') ? 'selected' : ''?>>
-                        <?=e($t)?>
-                    </option>
+            <label for="<?=$fieldId?>">Type</label>
+            <select id="<?=$fieldId?>" name="type">
+                <?php foreach($types as $t): ?>
+                    <option value="<?=e($t)?>" <?=$t === $currentType ? 'selected' : ''?>><?=e($t)?></option>
                 <?php endforeach; ?>
             </select>
         </div>
     <?php elseif ($fieldKey === 'status'): ?>
         <div class="field">
-            <label>Statut</label>
-            <select name="status">
+            <label for="<?=$fieldId?>">Statut</label>
+            <select id="<?=$fieldId?>" name="status">
                 <?php foreach(session_statuses() as $value => $label): ?>
                     <option value="<?=$value?>" <?=$value === ($session['status'] ?? 'planned') ? 'selected' : ''?>>
                         <?=e($label)?>
@@ -532,8 +683,8 @@ function session_form_field(string $fieldKey, array $session, array $athletePace
         </div>
     <?php elseif ($fieldKey === 'intensity'): ?>
         <div class="field">
-            <label>Intensité</label>
-            <select name="intensity">
+            <label for="<?=$fieldId?>">Intensité</label>
+            <select id="<?=$fieldId?>" name="intensity">
                 <?php foreach(intensities() as $value => $label): ?>
                     <option value="<?=$value?>" <?=$value === ($session['intensity'] ?? 'moderate') ? 'selected' : ''?>>
                         <?=e($label)?>
@@ -543,13 +694,13 @@ function session_form_field(string $fieldKey, array $session, array $athletePace
         </div>
     <?php elseif ($fieldKey === 'planned_distance_km'): ?>
         <div class="field">
-            <label>Volume total prévu (km)</label>
-            <input type="number" name="planned_distance_km" min="0" step="0.01" value="<?=e($session['planned_distance_km'] ?? '')?>">
+            <label for="<?=$fieldId?>">Volume total prévu (km)</label>
+            <input id="<?=$fieldId?>" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" name="planned_distance_km" value="<?=e($session['planned_distance_km'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'target_pace_code'): ?>
         <div class="field">
-            <label>Seuil / rythme visé</label>
-            <select name="target_pace_code">
+            <label for="<?=$fieldId?>">Seuil / rythme visé</label>
+            <select id="<?=$fieldId?>" name="target_pace_code">
                 <option value="">Non précisé</option>
                 <?php foreach($athletePaces as $pacePreset): ?>
                     <option value="<?=e($pacePreset['code'])?>" <?=($session['target_pace_code'] ?? '') === $pacePreset['code'] ? 'selected' : ''?>>
@@ -560,98 +711,109 @@ function session_form_field(string $fieldKey, array $session, array $athletePace
         </div>
     <?php elseif ($fieldKey === 'actual_distance_km'): ?>
         <div class="field">
-            <label>Volume réalisé (km)</label>
-            <input type="number" name="actual_distance_km" min="0" step="0.01" value="<?=e($session['actual_distance_km'] ?? '')?>">
+            <label for="<?=$fieldId?>">Volume réalisé (km)</label>
+            <input id="<?=$fieldId?>" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" name="actual_distance_km" value="<?=e($session['actual_distance_km'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'description'): ?>
         <div class="field full">
-            <label>Contenu de séance</label>
-            <textarea name="description"><?=e($session['description'] ?? '')?></textarea>
+            <label for="<?=$fieldId?>">Contenu de séance</label>
+            <textarea id="<?=$fieldId?>" name="description"><?=e($session['description'] ?? '')?></textarea>
         </div>
     <?php elseif ($fieldKey === 'warmup'): ?>
         <div class="field">
-            <label>Échauffement</label>
-            <textarea name="warmup"><?=e($session['warmup'] ?? '')?></textarea>
+            <label for="<?=$fieldId?>">Échauffement</label>
+            <textarea id="<?=$fieldId?>" name="warmup"><?=e($session['warmup'] ?? '')?></textarea>
         </div>
     <?php elseif ($fieldKey === 'main_workout'): ?>
         <div class="field">
-            <label>Corps de séance</label>
-            <textarea name="main_workout"><?=e($session['main_workout'] ?? '')?></textarea>
+            <label for="<?=$fieldId?>">Corps de séance</label>
+            <textarea id="<?=$fieldId?>" name="main_workout"><?=e($session['main_workout'] ?? '')?></textarea>
         </div>
     <?php elseif ($fieldKey === 'coach_notes'): ?>
         <div class="field full">
-            <label>Conseils du coach</label>
-            <textarea name="coach_notes"><?=e($session['coach_notes'] ?? '')?></textarea>
+            <label for="<?=$fieldId?>">Conseils du coach</label>
+            <textarea id="<?=$fieldId?>" name="coach_notes"><?=e($session['coach_notes'] ?? '')?></textarea>
         </div>
     <?php elseif ($fieldKey === 'duration_min'): ?>
         <div class="field">
-            <label>Durée prévue (min)</label>
-            <input type="number" name="duration_min" min="1" step="5" value="<?=e($session['duration_min'] ?? '')?>">
+            <label for="<?=$fieldId?>">Durée prévue (min)</label>
+            <input id="<?=$fieldId?>" type="number" inputmode="numeric" name="duration_min" min="0" step="1" value="<?=e($session['duration_min'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'actual_duration_min'): ?>
         <div class="field">
-            <label>Durée réelle (min)</label>
-            <input type="number" name="actual_duration_min" min="1" step="5" value="<?=e($session['actual_duration_min'] ?? '')?>">
+            <label for="<?=$fieldId?>">Durée réelle (min)</label>
+            <input id="<?=$fieldId?>" type="number" inputmode="numeric" name="actual_duration_min" min="0" step="1" value="<?=e($session['actual_duration_min'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'vma_percent'): ?>
         <div class="field">
-            <label>% VMA cible</label>
-            <input type="number" name="vma_percent" min="40" max="130" step="0.01" value="<?=e($session['vma_percent'] ?? '')?>">
+            <label for="<?=$fieldId?>">% VMA cible</label>
+            <input id="<?=$fieldId?>" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" name="vma_percent" value="<?=e($session['vma_percent'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'external_link'): ?>
         <div class="field">
-            <label>Lien optionnel</label>
-            <input name="external_link" value="<?=e($session['external_link'] ?? '')?>">
+            <label for="<?=$fieldId?>">Lien optionnel</label>
+            <input id="<?=$fieldId?>" type="url" inputmode="url" name="external_link" placeholder="https://..." value="<?=e($session['external_link'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'feeling'): ?>
         <div class="field">
-            <label>Ressenti athlète / 10</label>
-            <input type="number" name="feeling" min="1" max="10" step="1" value="<?=e($session['feeling'] ?? '')?>">
+            <label for="<?=$fieldId?>">Ressenti athlète / 10</label>
+            <input id="<?=$fieldId?>" type="number" inputmode="numeric" name="feeling" min="1" max="10" step="1" value="<?=e($session['feeling'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'pain'): ?>
         <div class="field">
-            <label>Douleur / fatigue / 10</label>
-            <input type="number" name="pain" min="0" max="10" step="1" value="<?=e($session['pain'] ?? '')?>">
+            <label for="<?=$fieldId?>">Douleur / fatigue / 10</label>
+            <input id="<?=$fieldId?>" type="number" inputmode="numeric" name="pain" min="0" max="10" step="1" value="<?=e($session['pain'] ?? '')?>">
         </div>
     <?php elseif ($fieldKey === 'athlete_feedback'): ?>
         <div class="field full">
-            <label>Retour athlète</label>
-            <textarea name="athlete_feedback"><?=e($session['athlete_feedback'] ?? '')?></textarea>
+            <label for="<?=$fieldId?>">Retour athlète</label>
+            <textarea id="<?=$fieldId?>" name="athlete_feedback"><?=e($session['athlete_feedback'] ?? '')?></textarea>
         </div>
     <?php elseif ($fieldKey === 'attachment'): ?>
         <div class="field full">
-            <label>Pièce jointe</label>
-            <input type="file" name="attachment">
+            <label for="<?=$fieldId?>">Pièce jointe <small>(PDF, image ou Word, 10 Mo max)</small></label>
+            <input id="<?=$fieldId?>" type="file" name="attachment" accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx">
         </div>
     <?php endif;
 }
 
 if ($page === 'login') {
-    header_html('Connexion');
+    if (current_user()) redirect('index.php');
 
     $err = $_SESSION['error'] ?? null;
     unset($_SESSION['error']);
 ?>
+<!doctype html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#0f766e">
+    <title>Connexion - <?=e(APP_NAME)?></title>
+    <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
 <div class="auth-body">
     <form class="auth-card" method="post">
-        <h1><?=APP_NAME?></h1>
+        <h1><?=e(APP_NAME)?></h1>
         <p>Connexion coach, athlète ou admin</p>
 
         <?php if($err): ?>
-            <div class="alert"><?=e($err)?></div>
+            <div class="alert" role="alert"><?=e($err)?></div>
         <?php endif; ?>
 
         <input type="hidden" name="csrf" value="<?=csrf_token()?>">
         <input type="hidden" name="action" value="login">
 
         <div class="field">
-            <label>Email</label>
-            <input type="email" name="email" required>
+            <label for="login-email">Email</label>
+            <input id="login-email" type="email" name="email" autocomplete="username" autocapitalize="none" required>
         </div>
 
         <div class="field">
-            <label>Mot de passe</label>
-            <input type="password" name="password" required>
+            <label for="login-password">Mot de passe</label>
+            <input id="login-password" type="password" name="password" autocomplete="current-password" required>
         </div>
 
         <label class="remember-choice">
@@ -662,7 +824,7 @@ if ($page === 'login') {
         <button class="btn" type="submit">Se connecter</button>
 
         <p class="auth-help">
-            Utilise les identifiants crees dans Hostinger.
+            Mot de passe oublié ? Demande à ton coach de t'en créer un nouveau.
         </p>
     </form>
 </div>
@@ -684,33 +846,68 @@ if ($page === 'home') {
     }
 
     $a = athlete_for_user($u['id']);
-    if (!$a) exit('Aucune fiche athlete rattachee a ce compte.');
+    if (!$a) error_page("Aucune fiche athlète n'est rattachée à ce compte. Contacte ton coach.", 404);
     redirect('index.php?page=calendar&athlete_id='.$a['id']);
+}
+
+if ($page === 'account') {
+    header_html('Mon compte');
+?>
+<section class="card narrow-card">
+    <h1>Mon compte</h1>
+    <p class="muted-text"><?=e($u['name'])?> · <?=e($u['email'])?></p>
+
+    <h2>Changer de mot de passe</h2>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+        <input type="hidden" name="action" value="change_password">
+        <input type="email" name="email" value="<?=e($u['email'])?>" autocomplete="username" hidden>
+
+        <div class="field">
+            <label for="current-password">Mot de passe actuel</label>
+            <input id="current-password" type="password" name="current_password" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+            <label for="new-password">Nouveau mot de passe <small>(8 caractères minimum)</small></label>
+            <input id="new-password" type="password" name="new_password" minlength="8" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+            <label for="confirm-password">Confirmer le nouveau mot de passe</label>
+            <input id="confirm-password" type="password" name="confirm_password" minlength="8" autocomplete="new-password" required>
+        </div>
+
+        <button class="btn" type="submit">Enregistrer le mot de passe</button>
+    </form>
+</section>
+<?php
+    footer_html();
+    exit;
 }
 
 if ($page === 'run_migrations') {
     require_role('super_admin');
 
-    try {
-        $appliedMigrations = run_pending_migrations();
-        $migrationError = null;
-    } catch (Throwable $e) {
-        $appliedMigrations = [];
-        $migrationError = $e->getMessage();
-    }
+    $migrationResult = $_SESSION['migration_result'] ?? null;
+    unset($_SESSION['migration_result']);
 
     header_html('Migrations');
 ?>
 <section class="card">
     <h1>Migrations base de données</h1>
 
-    <?php if($migrationError): ?>
-        <div class="alert">Migration impossible : <?=e($migrationError)?></div>
-    <?php elseif($appliedMigrations): ?>
-        <div class="success-alert" role="status">Migration appliquée : <?=e(implode(', ', $appliedMigrations))?></div>
-    <?php else: ?>
+    <?php if($migrationResult && $migrationResult['error']): ?>
+        <div class="alert">Migration impossible : <?=e($migrationResult['error'])?></div>
+    <?php elseif($migrationResult && $migrationResult['applied']): ?>
+        <div class="success-alert" role="status">Migration appliquée : <?=e(implode(', ', $migrationResult['applied']))?></div>
+    <?php elseif($migrationResult): ?>
         <div class="success-alert" role="status">Base déjà à jour.</div>
     <?php endif; ?>
+
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+        <input type="hidden" name="action" value="run_migrations">
+        <button class="btn" type="submit">Lancer les migrations</button>
+    </form>
 
     <div class="actions">
         <a class="btn" href="index.php?page=dashboard">Retour dashboard</a>
@@ -798,7 +995,7 @@ if ($page === 'admin') {
     <div class="actions">
         <a class="btn secondary" href="index.php?page=dashboard">Voir tous les athlètes</a>
         <a class="btn secondary" href="index.php?page=coach_calendar">Calendrier général</a>
-        <a class="btn" href="index.php?page=coach_settings">Parametres</a>
+        <a class="btn" href="index.php?page=coach_settings">Paramètres</a>
     </div>
 </div>
 
@@ -825,11 +1022,12 @@ if ($page === 'admin') {
             </div>
 
             <div class="field">
-                <label>Mot de passe temporaire</label>
-                <input name="password" placeholder="Laisser vide pour password123">
+                <label for="coach-password">Mot de passe temporaire <small>(8 caractères minimum, à transmettre au coach)</small></label>
+                <input id="coach-password" name="password" minlength="8" autocomplete="new-password" required>
             </div>
 
             <button class="btn">Créer le coach</button>
+
         </form>
     </section>
 
@@ -859,37 +1057,43 @@ if ($page === 'admin') {
 if ($page === 'daily_debrief') {
     $athleteId = (int)($_GET['athlete_id'] ?? 0);
     $date = $_GET['date'] ?? date('Y-m-d');
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || !can_access_athlete($athleteId)) exit('Accès refusé');
+    if (!valid_date((string)$date) || !can_access_athlete($athleteId)) deny_access();
 
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$athleteId]);
     $a = $stmt->fetch();
     $athletePaces = get_athlete_paces($athleteId);
 
-    $stmt = db()->prepare('SELECT id FROM sessions WHERE athlete_id=? AND date=? ORDER BY id LIMIT 1');
-    $stmt->execute([$athleteId, $date]);
-    $existingSessionId = $stmt->fetchColumn();
-    if ($existingSessionId) redirect('index.php?page=session&id='.(int)$existingSessionId);
-
     $debriefStorageReady = table_exists('daily_debriefs');
     $debrief = get_daily_debrief($athleteId, $date);
+
+    // A day with a planned session is debriefed on the session itself, unless a daily
+    // retour was already written before the session was added: then it stays readable here.
+    $stmt = db()->prepare('SELECT id, title FROM sessions WHERE athlete_id=? AND date=? ORDER BY id');
+    $stmt->execute([$athleteId, $date]);
+    $daySessions = $stmt->fetchAll();
+    if ($daySessions && !$debrief['exists']) redirect('index.php?page=session&id='.(int)$daySessions[0]['id']);
+
     $canEditDebrief = $u['role'] === 'athlete' && $debriefStorageReady;
-    $success = $_SESSION['success'] ?? null;
-    unset($_SESSION['success']);
 
     header_html('Retour journalier');
 ?>
-<?php if($success): ?>
-    <div class="success-alert" role="status"><?=e($success)?><?=!empty($debrief['updated_at']) ? ' · '.e($debrief['updated_at']) : ''?></div>
-<?php endif; ?>
 <section class="card debrief-card">
     <div class="debrief-head">
         <div>
             <h1>Retour du <?=e(format_full_date($date))?></h1>
-            <p class="muted-text"><?=e($a['first_name'].' '.$a['last_name'])?> · Aucune séance planifiée ce jour.</p>
+            <p class="muted-text"><?=e($a['first_name'].' '.$a['last_name'])?><?=$daySessions ? '' : ' · Aucune séance planifiée ce jour.'?></p>
         </div>
-        <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=e(substr($date, 0, 7))?>">Retour calendrier</a>
+        <a class="btn secondary small" href="<?=e(session_calendar_url($athleteId, substr($date, 0, 7)))?>">Retour calendrier</a>
     </div>
+
+    <?php if($daySessions): ?>
+        <div class="alert">Ce retour a été écrit avant l'ajout d'une séance ce jour-là :
+            <?php foreach($daySessions as $i => $daySession): ?>
+                <?=$i ? ', ' : ''?><a href="index.php?page=session&id=<?=(int)$daySession['id']?>"><?=e($daySession['title'])?></a>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
 
     <?php if($debrief['exists']): ?>
         <div class="debrief-summary">
@@ -904,6 +1108,7 @@ if ($page === 'daily_debrief') {
         <?php if($debrief['sensations']): ?>
             <div class="detail-item highlight-item"><strong>Sensations / commentaires</strong><br><?=nl2br(e($debrief['sensations']))?></div>
         <?php endif; ?>
+        <?php weather_read_html($debrief['weather']); ?>
     <?php endif; ?>
 
     <?php if($canEditDebrief): ?>
@@ -916,7 +1121,7 @@ if ($page === 'daily_debrief') {
             <button class="btn" type="submit">Enregistrer le retour</button>
         </form>
     <?php elseif(!$debriefStorageReady): ?>
-        <div class="alert">La migration des retours journaliers n'a pas encore été appliquée. Lance la page Migrations.</div>
+        <div class="alert">Les retours journaliers ne sont pas encore disponibles.</div>
     <?php elseif(!$debrief['exists']): ?>
         <p class="muted-text">Aucun retour enregistré pour cette journée.</p>
     <?php endif; ?>
@@ -930,7 +1135,7 @@ if ($page === 'quick_session') {
     require_role('coach');
     $athleteId = (int)($_GET['athlete_id'] ?? 0);
     $date = $_GET['date'] ?? date('Y-m-d');
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || !can_access_athlete($athleteId)) exit('Accès refusé');
+    if (!valid_date((string)$date) || !can_access_athlete($athleteId)) deny_access();
 
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$athleteId]);
@@ -944,7 +1149,7 @@ if ($page === 'quick_session') {
             <h1>Ajouter une séance</h1>
             <p class="muted-text"><?=e($a['first_name'].' '.$a['last_name'])?> · <?=e(format_full_date($date))?></p>
         </div>
-        <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$athleteId?>&month=<?=e(substr($date, 0, 7))?>">Retour calendrier</a>
+        <a class="btn secondary small" href="<?=e(session_calendar_url($athleteId, substr($date, 0, 7)))?>">Retour calendrier</a>
     </div>
 
     <form method="post" class="debrief-form">
@@ -990,31 +1195,39 @@ if ($page === 'dashboard') {
 
     [$weekStart, $weekEnd] = week_bounds();
 
-    $plannedWhere = table_has_column('sessions', 'status') ? 'status="planned" AND date >= CURDATE()' : 'date >= CURDATE()';
-    $doneWhere = table_has_column('sessions', 'status') ? 'status="done"' : 'date < CURDATE()';
-    $weekStatusWhere = table_has_column('sessions', 'status') ? ' AND status <> "cancelled"' : '';
+    $today = date('Y-m-d');
+    $inSevenDays = (new DateTime($today))->modify('+7 days')->format('Y-m-d');
+    $hasStatus = table_has_column('sessions', 'status');
+    $plannedWhere = $hasStatus ? 's.status="planned" AND s.date >= ?' : 's.date >= ?';
+    $doneWhere = $hasStatus ? 's.status="done"' : 's.date < ?';
+    $doneParams = $hasStatus ? [] : [$today];
+    $weekStatusWhere = $hasStatus ? ' AND s.status <> "cancelled"' : '';
     $usesDistanceLoad = table_has_column('sessions', 'actual_distance_km') || table_has_column('sessions', 'planned_distance_km');
+    $debriefJoin = table_has_column('session_debriefs', 'actual_distance_km')
+        ? ' LEFT JOIN session_debriefs sd ON sd.session_id=s.id'
+        : '';
     $loadExpr = $usesDistanceLoad
         ? 'COALESCE(SUM(' . run_equivalent_sql('COALESCE(' .
-            (table_has_column('sessions', 'actual_distance_km') ? 'actual_distance_km' : 'NULL') . ', ' .
-            (table_has_column('sessions', 'planned_distance_km') ? 'planned_distance_km' : 'NULL') . ', 0)', 's.type') . '), 0)'
+            ($debriefJoin ? 'sd.actual_distance_km, ' : '') .
+            (table_has_column('sessions', 'actual_distance_km') ? 's.actual_distance_km' : 'NULL') . ', ' .
+            (table_has_column('sessions', 'planned_distance_km') ? 's.planned_distance_km' : 'NULL') . ', 0)', 's.type') . '), 0)'
         : (table_has_column('sessions', 'actual_duration_min') || table_has_column('sessions', 'duration_min')
         ? 'COALESCE(SUM(COALESCE(' .
-            (table_has_column('sessions', 'actual_duration_min') ? 'actual_duration_min' : 'NULL') . ', ' .
-            (table_has_column('sessions', 'duration_min') ? 'duration_min' : 'NULL') . ', 0)), 0)'
+            (table_has_column('sessions', 'actual_duration_min') ? 's.actual_duration_min' : 'NULL') . ', ' .
+            (table_has_column('sessions', 'duration_min') ? 's.duration_min' : 'NULL') . ', 0)), 0)'
         : '0');
 
     $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND ' . $plannedWhere);
-    $stmt->execute($coachAthleteParams);
+    $stmt->execute(array_merge($coachAthleteParams, [$today]));
     $plannedCount = (int)$stmt->fetchColumn();
 
     $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND ' . $doneWhere);
-    $stmt->execute($coachAthleteParams);
+    $stmt->execute(array_merge($coachAthleteParams, $doneParams));
     $doneCount = (int)$stmt->fetchColumn();
 
     $alertParts = [];
-    if (table_has_column('sessions', 'feeling')) $alertParts[] = '(feeling IS NOT NULL AND feeling >= 7)';
-    if (table_has_column('sessions', 'pain')) $alertParts[] = '(pain IS NOT NULL AND pain >= 7)';
+    if (table_has_column('sessions', 'feeling')) $alertParts[] = '(s.feeling IS NOT NULL AND s.feeling >= 7)';
+    if (table_has_column('sessions', 'pain')) $alertParts[] = '(s.pain IS NOT NULL AND s.pain >= 7)';
     if ($alertParts) {
         $stmt = db()->prepare('SELECT COUNT(*) FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . ' AND (' . implode(' OR ', $alertParts) . ')');
         $stmt->execute($coachAthleteParams);
@@ -1023,45 +1236,64 @@ if ($page === 'dashboard') {
         $alertCount = 0;
     }
 
-    $stmt = db()->prepare('SELECT ' . $loadExpr . ' FROM sessions s JOIN athletes a ON a.id=s.athlete_id WHERE ' . $coachAthleteWhere . $weekStatusWhere . ' AND date BETWEEN ? AND ?');
+    $stmt = db()->prepare('SELECT ' . $loadExpr . ' FROM sessions s JOIN athletes a ON a.id=s.athlete_id' . $debriefJoin . ' WHERE ' . $coachAthleteWhere . $weekStatusWhere . ' AND s.date BETWEEN ? AND ?');
     $stmt->execute(array_merge($coachAthleteParams, [$weekStart, $weekEnd]));
     $weekLoad = (float)$stmt->fetchColumn();
+    if ($usesDistanceLoad && table_has_column('daily_debriefs', 'actual_distance_km')) {
+        $stmt = db()->prepare('SELECT COALESCE(SUM(d.actual_distance_km), 0) FROM daily_debriefs d JOIN athletes a ON a.id=d.athlete_id WHERE ' . $coachAthleteWhere . ' AND d.date BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM sessions s2 WHERE s2.athlete_id=d.athlete_id AND s2.date=d.date)');
+        $stmt->execute(array_merge($coachAthleteParams, [$weekStart, $weekEnd]));
+        $weekLoad += (float)$stmt->fetchColumn();
+    }
     $weekLoadLabel = $usesDistanceLoad ? format_distance($weekLoad) : ((int)$weekLoad . ' min');
 
-    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE ' . $coachAthleteWhere . ' ORDER BY a.first_name, a.last_name');
-    $stmt->execute($coachAthleteParams);
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE ' . $coachAthleteWhere . ' AND CONCAT(a.first_name," ",a.last_name," ",a.email) LIKE ? ORDER BY a.first_name, a.last_name');
+    $stmt->execute(array_merge($coachAthleteParams, ['%'.$q.'%']));
     $overview = $stmt->fetchAll();
 
-    foreach ($overview as &$row) {
-        $stmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND ' . $plannedWhere . ' ORDER BY s.date LIMIT 1');
-        $stmt->execute([$row['id']]);
-        $row['next_session'] = $stmt->fetch() ?: null;
-        $row['next_date'] = $row['next_session']['date'] ?? null;
-
-        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=? AND ' . $doneWhere);
-        $stmt->execute([$row['id']]);
-        $row['last_done_date'] = $stmt->fetchColumn() ?: null;
-
-        if (table_has_column('sessions', 'feeling')) {
-            $stmt = db()->prepare('SELECT AVG(feeling) FROM sessions WHERE athlete_id=?');
-            $stmt->execute([$row['id']]);
-            $row['avg_feeling'] = $stmt->fetchColumn();
-        } else {
-            $row['avg_feeling'] = null;
+    // One grouped query for all athletes instead of five queries per athlete.
+    $statsById = [];
+    $nextById = [];
+    $overviewIds = array_map(function ($row) { return (int)$row['id']; }, $overview);
+    if ($overviewIds) {
+        $in = implode(',', array_fill(0, count($overviewIds), '?'));
+        $plannedFlag = $hasStatus ? 's.status="planned"' : '1=1';
+        $stmt = db()->prepare(
+            'SELECT s.athlete_id,
+                MIN(CASE WHEN ' . $plannedFlag . ' AND s.date >= ? THEN s.date END) AS next_date,
+                MAX(CASE WHEN ' . $doneWhere . ' THEN s.date END) AS last_done_date,
+                ' . (table_has_column('sessions', 'feeling') ? 'AVG(s.feeling)' : 'NULL') . ' AS avg_feeling,
+                SUM(CASE WHEN ' . $plannedFlag . ' AND s.date BETWEEN ? AND ? THEN 1 ELSE 0 END) AS planned_next_week,
+                MAX(s.date) AS last_session_date
+             FROM sessions s WHERE s.athlete_id IN (' . $in . ') GROUP BY s.athlete_id'
+        );
+        $stmt->execute(array_merge([$today], $doneParams, [$today, $inSevenDays], $overviewIds));
+        foreach ($stmt->fetchAll() as $statRow) {
+            $statsById[(int)$statRow['athlete_id']] = $statRow;
         }
 
-        $stmt = db()->prepare('SELECT COUNT(*) FROM sessions WHERE athlete_id=? AND ' . (table_has_column('sessions', 'status') ? 'status="planned" AND ' : '') . 'date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)');
-        $stmt->execute([$row['id']]);
-        $row['planned_next_week'] = (int)$stmt->fetchColumn();
+        $stmt = db()->prepare(
+            'SELECT s.athlete_id, s.title, s.date FROM sessions s
+             WHERE s.athlete_id IN (' . $in . ') AND ' . $plannedWhere . '
+             ORDER BY s.date, s.id'
+        );
+        $stmt->execute(array_merge($overviewIds, [$today]));
+        foreach ($stmt->fetchAll() as $nextRow) {
+            $nextById[(int)$nextRow['athlete_id']] = $nextById[(int)$nextRow['athlete_id']] ?? $nextRow;
+        }
+    }
 
-        $stmt = db()->prepare('SELECT MAX(date) FROM sessions WHERE athlete_id=?');
-        $stmt->execute([$row['id']]);
-        $row['last_session_date'] = $stmt->fetchColumn() ?: null;
+    foreach ($overview as &$row) {
+        $stats = $statsById[(int)$row['id']] ?? [];
+        $row['next_session'] = $nextById[(int)$row['id']] ?? null;
+        $row['next_date'] = $row['next_session']['date'] ?? null;
+        $row['last_done_date'] = $stats['last_done_date'] ?? null;
+        $row['avg_feeling'] = $stats['avg_feeling'] ?? null;
+        $row['planned_next_week'] = (int)($stats['planned_next_week'] ?? 0);
+        $row['last_session_date'] = $stats['last_session_date'] ?? null;
     }
     unset($row);
 
     $reminders = array_values(array_filter($overview, function ($row) { return (int)$row['planned_next_week'] === 0; }));
-    $attentionRows = array_slice($reminders, 0, 4);
     $availableCoaches = get_available_coaches();
     $defaultPaces = default_pace_presets();
 ?>
@@ -1070,19 +1302,19 @@ if ($page === 'dashboard') {
 
     <div class="actions">
         <a class="btn" href="index.php?page=coach_calendar">Calendrier général</a>
-        <a class="btn secondary" href="index.php?page=coach_settings">Parametres</a>
+        <a class="btn secondary" href="index.php?page=coach_settings">Paramètres</a>
     </div>
 
-    <form>
+    <form role="search">
         <input type="hidden" name="page" value="dashboard">
-        <input class="search" name="q" placeholder="Rechercher un athlète" value="<?=e($q)?>">
+        <input class="search" type="search" name="q" aria-label="Rechercher un athlète" placeholder="Rechercher un athlète" value="<?=e($q)?>">
     </form>
 </div>
 
 <div class="stats-grid">
-    <section class="stat-card"><strong><?=count($athletes)?></strong><span>Athletes</span></section>
-    <section class="stat-card"><strong><?=$plannedCount?></strong><span>Seances a venir</span></section>
-    <section class="stat-card"><strong><?=$doneCount?></strong><span>Seances realisees</span></section>
+    <section class="stat-card"><strong><?=count($athletes)?></strong><span>Athlètes</span></section>
+    <section class="stat-card"><strong><?=$plannedCount?></strong><span>Séances à venir</span></section>
+    <section class="stat-card"><strong><?=$doneCount?></strong><span>Séances réalisées</span></section>
     <section class="stat-card"><strong><?=e($weekLoadLabel)?></strong><span>Charge semaine</span></section>
     <section class="stat-card warning"><strong><?=count($reminders)?></strong><span>Rappels planning</span></section>
     <section class="stat-card danger"><strong><?=$alertCount?></strong><span>Alertes fatigue</span></section>
@@ -1090,9 +1322,9 @@ if ($page === 'dashboard') {
 
 <section class="focus-strip">
     <div>
-        <span class="eyebrow">Priorite coach</span>
-        <strong><?=count($reminders)?> athlete<?=count($reminders) > 1 ? 's' : ''?> sans seance cette semaine</strong>
-        <p>Commence par les athletes sans prochaine seance planifiee.</p>
+        <span class="eyebrow">Priorité coach</span>
+        <strong><?=count($reminders)?> athlète<?=count($reminders) > 1 ? 's' : ''?> sans séance dans les 7 prochains jours</strong>
+        <p>Commence par les athlètes sans prochaine séance planifiée.</p>
     </div>
     <div class="actions">
         <a class="btn secondary" href="#rappels">Voir les rappels</a>
@@ -1110,14 +1342,14 @@ if ($page === 'dashboard') {
                     <p><?=e($row['sport'])?> · <?=e($row['level'])?> · VMA <?=e($row['vma'])?> km/h</p>
                 </div>
                 <div>
-                    <span>Prochaine: <?=e($row['next_date'] ? relative_day_label($row['next_date']).' - '.format_short_date($row['next_date']) : 'Aucune')?></span>
-                    <span><?=e($row['next_session']['title'] ?? 'Aucune seance programmee')?></span>
-                    <span>Ressenti moy.: <?=e($row['avg_feeling'] ? round((float)$row['avg_feeling'], 1).'/10' : '-')?></span>
+                    <span>Prochaine : <?=e($row['next_date'] ? relative_day_label($row['next_date']).' - '.format_short_date($row['next_date']) : 'aucune')?></span>
+                    <span><?=e($row['next_session']['title'] ?? 'Aucune séance programmée')?></span>
+                    <span>Ressenti moy. : <?=e($row['avg_feeling'] ? round((float)$row['avg_feeling'], 1).'/10' : '-')?></span>
                 </div>
                 <div class="row-actions">
                     <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$row['id']?>">Calendrier</a>
                     <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$row['id']?>">Modifier</a>
-                    <a class="btn small" href="index.php?page=edit_session&athlete_id=<?=$row['id']?>&date=<?=date('Y-m-d')?>">Seance</a>
+                    <a class="btn small" href="index.php?page=edit_session&athlete_id=<?=$row['id']?>&date=<?=date('Y-m-d')?>">Séance</a>
                 </div>
             </article>
         <?php endforeach; ?>
@@ -1125,16 +1357,16 @@ if ($page === 'dashboard') {
 </section>
 
 <section class="card" id="rappels">
-    <h2>Rappels manque de seance</h2>
+    <h2>Athlètes sans séance dans les 7 prochains jours</h2>
     <?php if(!$reminders): ?>
         <p class="muted-text">Aucun rappel pour le moment.</p>
     <?php endif; ?>
     <div class="overview-list">
-        <?php foreach($attentionRows as $row): ?>
+        <?php foreach($reminders as $row): ?>
             <article class="overview-row warning-row">
                 <div>
                     <strong><?=e($row['first_name'].' '.$row['last_name'])?></strong>
-                    <span>Derniere seance: <?=e($row['last_session_date'] ? relative_day_label($row['last_session_date']).' - '.format_short_date($row['last_session_date']) : 'aucune')?></span>
+                    <span>Dernière séance : <?=e($row['last_session_date'] ? relative_day_label($row['last_session_date']).' - '.format_short_date($row['last_session_date']) : 'aucune')?></span>
                 </div>
                 <a class="btn small" href="index.php?page=edit_session&athlete_id=<?=$row['id']?>&date=<?=date('Y-m-d')?>">Planifier</a>
             </article>
@@ -1151,45 +1383,45 @@ if ($page === 'dashboard') {
             <input type="hidden" name="action" value="create_athlete">
 
             <div class="field">
-                <label>Prénom</label>
-                <input name="first_name" required>
+                <label for="new-athlete-first-name">Prénom</label>
+                <input id="new-athlete-first-name" name="first_name" autocomplete="off" required>
             </div>
 
             <div class="field">
-                <label>Nom</label>
-                <input name="last_name" required>
+                <label for="new-athlete-last-name">Nom</label>
+                <input id="new-athlete-last-name" name="last_name" autocomplete="off" required>
             </div>
 
             <div class="field">
-                <label>Email</label>
-                <input type="email" name="email" required>
+                <label for="new-athlete-email">Email</label>
+                <input id="new-athlete-email" type="email" name="email" autocomplete="off" autocapitalize="none" required>
             </div>
 
             <div class="field">
-                <label>Sport</label>
-                <input name="sport" value="Course" required>
+                <label for="new-athlete-sport">Sport</label>
+                <input id="new-athlete-sport" name="sport" value="Course" required>
             </div>
 
             <div class="field">
-                <label>Niveau</label>
-                <input name="level" value="Intermediaire" required>
+                <label for="new-athlete-level">Niveau</label>
+                <input id="new-athlete-level" name="level" value="Intermédiaire" required>
             </div>
 
             <div class="field">
-                <label>Objectif</label>
-                <input name="goal" placeholder="Marathon, reprise, 10 km...">
+                <label for="new-athlete-goal">Objectif</label>
+                <input id="new-athlete-goal" name="goal" placeholder="Marathon, reprise, 10 km...">
             </div>
 
             <div class="field">
-                <label>VMA (km/h)</label>
-                <input type="number" name="vma" min="5" max="30" step="0.1" value="15" required>
+                <label for="new-athlete-vma">VMA (km/h)</label>
+                <input id="new-athlete-vma" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9])?" name="vma" value="15" required>
             </div>
 
             <?php athlete_pace_fields($defaultPaces); ?>
 
             <div class="field">
-                <label>Notes</label>
-                <textarea name="notes" placeholder="Contraintes, blessures, disponibilites..."></textarea>
+                <label for="new-athlete-notes">Notes</label>
+                <textarea id="new-athlete-notes" name="notes" placeholder="Contraintes, blessures, disponibilités..."></textarea>
             </div>
 
             <?php if($u['role'] === 'super_admin'): ?>
@@ -1219,8 +1451,8 @@ if ($page === 'dashboard') {
             </div>
 
             <div class="field">
-                <label>Mot de passe temporaire</label>
-                <input name="password" placeholder="Laisser vide pour password123">
+                <label for="new-athlete-password">Mot de passe temporaire <small>(8 caractères minimum, à transmettre à l'athlète)</small></label>
+                <input id="new-athlete-password" name="password" minlength="8" autocomplete="new-password" required>
             </div>
 
             <button class="btn">Créer</button>
@@ -1247,19 +1479,19 @@ if ($page === 'dashboard') {
                 <td><?=e($a['first_name'].' '.$a['last_name'])?></td>
                 <td><?=e($a['email'])?></td>
                 <td><?=e($a['sport'])?> · <?=e($a['level'])?> · VMA <?=e($a['vma'])?></td>
-                <td class="actions">
+                <td><div class="actions">
                     <a class="btn small" href="index.php?page=calendar&athlete_id=<?=$a['id']?>">Calendrier</a>
                     <a class="btn secondary small" href="index.php?page=edit_athlete&id=<?=$a['id']?>">Modifier</a>
 
-                    <?php if($u['role'] === 'super_admin' || is_primary_coach_for_athlete((int)$a['id'], (int)$u['id'])): ?>
-                        <form method="post" onsubmit="return confirm('Supprimer cet athlète ?')">
+                    <?php if($u['role'] === 'super_admin' || (int)$a['coach_id'] === (int)$u['id']): ?>
+                        <form method="post" onsubmit="return confirm('Supprimer cet athlète, ses séances, ses retours et son compte ? Cette action est définitive.')">
                             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
                             <input type="hidden" name="action" value="delete_athlete">
                             <input type="hidden" name="id" value="<?=$a['id']?>">
                             <button class="btn danger small">Supprimer</button>
                         </form>
                     <?php endif; ?>
-                </td>
+                </div></td>
             </tr>
         <?php endforeach; ?>
         </tbody>
@@ -1275,7 +1507,7 @@ if ($page === 'edit_athlete') {
 
     $id = (int)$_GET['id'];
 
-    if (!can_access_athlete($id)) exit('Accès refusé');
+    if (!can_access_athlete($id)) deny_access();
 
     $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$id]);
@@ -1290,11 +1522,15 @@ if ($page === 'edit_athlete') {
             break;
         }
     }
+    $canManageAccess = $u['role'] === 'super_admin' || (int)$a['coach_id'] === (int)$u['id'];
 
     header_html('Modifier athlète');
 ?>
 <section class="card">
-    <h1>Modifier athlète</h1>
+    <div class="debrief-head">
+        <h1>Modifier athlète</h1>
+        <a class="btn secondary small" href="index.php?page=calendar&athlete_id=<?=$id?>">Annuler</a>
+    </div>
 
     <form method="post">
         <input type="hidden" name="csrf" value="<?=csrf_token()?>">
@@ -1302,45 +1538,45 @@ if ($page === 'edit_athlete') {
         <input type="hidden" name="id" value="<?=$a['id']?>">
 
         <div class="field">
-            <label>Prénom</label>
-            <input name="first_name" value="<?=e($a['first_name'])?>" required>
+            <label for="athlete-first-name">Prénom</label>
+            <input id="athlete-first-name" name="first_name" value="<?=e($a['first_name'])?>" required>
         </div>
 
         <div class="field">
-            <label>Nom</label>
-            <input name="last_name" value="<?=e($a['last_name'])?>" required>
+            <label for="athlete-last-name">Nom</label>
+            <input id="athlete-last-name" name="last_name" value="<?=e($a['last_name'])?>" required>
         </div>
 
         <div class="field">
-            <label>Email</label>
-            <input type="email" name="email" value="<?=e($a['email'])?>" required>
+            <label for="athlete-email">Email <?=$canManageAccess ? '' : '<small>(modifiable par le coach principal)</small>'?></label>
+            <input id="athlete-email" type="email" name="email" value="<?=e($a['email'])?>" autocapitalize="none" <?=$canManageAccess ? 'required' : 'readonly'?>>
         </div>
 
         <div class="field">
-            <label>Sport</label>
-            <input name="sport" value="<?=e($a['sport'])?>" required>
+            <label for="athlete-sport">Sport</label>
+            <input id="athlete-sport" name="sport" value="<?=e($a['sport'])?>" required>
         </div>
 
         <div class="field">
-            <label>Niveau</label>
-            <input name="level" value="<?=e($a['level'])?>" required>
+            <label for="athlete-level">Niveau</label>
+            <input id="athlete-level" name="level" value="<?=e($a['level'])?>" required>
         </div>
 
         <div class="field">
-            <label>Objectif</label>
-            <input name="goal" value="<?=e($a['goal'])?>">
+            <label for="athlete-goal">Objectif</label>
+            <input id="athlete-goal" name="goal" value="<?=e($a['goal'])?>">
         </div>
 
         <div class="field">
-            <label>VMA (km/h)</label>
-            <input type="number" name="vma" min="5" max="30" step="0.1" value="<?=e($a['vma'])?>" required>
+            <label for="athlete-vma">VMA (km/h)</label>
+            <input id="athlete-vma" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9])?" name="vma" value="<?=e($a['vma'])?>" required>
         </div>
 
         <?php athlete_pace_fields($athletePaces); ?>
 
         <div class="field">
-            <label>Notes</label>
-            <textarea name="notes"><?=e($a['notes'])?></textarea>
+            <label for="athlete-notes">Notes</label>
+            <textarea id="athlete-notes" name="notes"><?=e($a['notes'])?></textarea>
         </div>
 
         <?php if($u['role'] === 'super_admin'): ?>
@@ -1357,8 +1593,8 @@ if ($page === 'edit_athlete') {
         <?php endif; ?>
 
         <div class="field">
-            <label>Coach secondaire</label>
-            <select name="secondary_coach_id">
+            <label for="athlete-secondary-coach">Coach secondaire <?=$canManageAccess ? '' : '<small>(modifiable par le coach principal)</small>'?></label>
+            <select id="athlete-secondary-coach" name="secondary_coach_id" <?=$canManageAccess ? '' : 'disabled'?>>
                 <option value="">Aucun</option>
                 <?php foreach($availableCoaches as $coach): ?>
                     <?php if((int)$coach['id'] === (int)$a['coach_id']) continue; ?>
@@ -1397,7 +1633,7 @@ if ($page === 'coach_calendar') {
     $athletes = $stmt->fetchAll();
 
     if ($selectedAthleteId > 0 && !can_access_athlete($selectedAthleteId)) {
-        exit('Accès refusé');
+        deny_access();
     }
 
     if ($selectedAthleteId > 0) {
@@ -1429,7 +1665,7 @@ if ($page === 'coach_calendar') {
         $sessions[$s['date']][] = $s;
     }
     $dailyDebriefs = $selectedAthleteId > 0
-        ? attach_daily_debriefs_to_calendar($sessions, $selectedAthleteId, $start, $end)
+        ? attach_daily_debriefs_to_calendar($selectedAthleteId, $start, $end)
         : [];
 
     header_html('Calendrier général');
@@ -1442,7 +1678,7 @@ if ($page === 'coach_calendar') {
 <div class="calendar-head">
     <div>
         <h1>Calendrier général coach</h1>
-        <p><?=e($month->format('m/Y'))?></p>
+        <p><?=e(format_month_label($month))?></p>
     </div>
 
     <div class="actions">
@@ -1457,8 +1693,8 @@ if ($page === 'coach_calendar') {
         <input type="hidden" name="month" value="<?=$month->format('Y-m')?>">
 
         <div class="field">
-            <label>Filtrer par athlète</label>
-            <select name="athlete_id" onchange="this.form.submit()">
+            <label for="calendar-athlete-filter">Filtrer par athlète</label>
+            <select id="calendar-athlete-filter" name="athlete_id" onchange="this.form.submit()">
                 <option value="0">Tous les athlètes</option>
                 <?php foreach($athletes as $athlete): ?>
                     <option value="<?=$athlete['id']?>" <?=$selectedAthleteId === (int)$athlete['id'] ? 'selected' : ''?>>
@@ -1498,18 +1734,19 @@ if ($page === 'coach_calendar') {
 
             <?php if($dailyDebrief): ?>
                 <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Consulter le retour du <?=e(format_full_date($date))?>" title="Retour enregistré">
-                    <span class="debrief-dot debrief-debriefed" aria-label="Retour enregistré"></span>
+                    <span class="debrief-dot debrief-debriefed" aria-hidden="true"></span>
                 </a>
             <?php endif; ?>
 
             <?php foreach($daySessions as $s):
                 $debriefStatus = debrief_summary_status($s);
             ?>
-                <a class="session-pill <?=type_class($s['type'])?>" href="index.php?page=session&id=<?=$s['id']?>" title="<?=e($s['first_name'].' '.$s['last_name'].' — '.$s['title'])?>">
+                <a class="session-pill <?=e(type_class($s['type']))?>" href="index.php?page=session&id=<?=$s['id']?>" title="<?=e($s['first_name'].' '.$s['last_name'].' — '.$s['title'])?>">
                     <span class="session-athlete"><?=e($s['first_name'])?></span>
+                    <span class="session-initials" aria-hidden="true"><?=e(athlete_initials($s['first_name'], $s['last_name']))?></span>
                     <span class="session-title"><?=e($s['title'])?></span>
                     <span class="session-meta"><?=e($s['type'])?><?=session_volume_label($s) ? ' · '.e(session_volume_label($s)) : ''?></span>
-                    <span class="debrief-dot debrief-<?=$debriefStatus?>" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
+                    <span class="debrief-dot debrief-<?=$debriefStatus?>" role="img" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
                 </a>
             <?php endforeach; ?>
         </div>
@@ -1526,7 +1763,7 @@ if ($page === 'coach_calendar') {
 if ($page === 'calendar') {
     $athleteId = (int)$_GET['athlete_id'];
 
-    if (!can_access_athlete($athleteId)) exit('Accès refusé');
+    if (!can_access_athlete($athleteId)) deny_access();
 
     $month = month_start($_GET['month'] ?? null);
     $start = (clone $month)->modify('monday this week');
@@ -1552,7 +1789,7 @@ if ($page === 'calendar') {
     $weekStatusWhere = table_has_column('sessions', 'status') ? ' AND s.status <> "cancelled"' : '';
     $weekStmt = db()->prepare('SELECT ' . session_select_sql('s') . ' FROM sessions s WHERE s.athlete_id=? AND s.date BETWEEN ? AND ?' . $weekStatusWhere);
     $weekStmt->execute([$athleteId, $currentWeekStart, $currentWeekEnd]);
-    $weekSessions = $weekStmt->fetchAll();
+    $weekSessions = attach_debriefs_to_sessions($weekStmt->fetchAll());
     $weekSessionCount = count($weekSessions);
     $weekVolumes = ['run' => 0.0, 'bike' => 0.0, 'swim' => 0.0];
     $weekRunEquivalent = 0.0;
@@ -1560,6 +1797,15 @@ if ($page === 'calendar') {
         $volume = session_volume($weekSession);
         $weekVolumes[session_sport((string)$weekSession['type'])] += $volume;
         $weekRunEquivalent += run_equivalent_km($volume, (string)$weekSession['type']);
+    }
+    // Km from daily retours count as running, only on days without a session
+    // (otherwise the session's own km are already counted).
+    $weekSessionDates = array_flip(array_column($weekSessions, 'date'));
+    foreach (attach_daily_debriefs_to_calendar($athleteId, new DateTime($currentWeekStart), new DateTime($currentWeekEnd)) as $dailyDate => $weekDailyDebrief) {
+        if (isset($weekSessionDates[$dailyDate])) continue;
+        $volume = (float)($weekDailyDebrief['actual_distance_km'] ?? 0);
+        $weekVolumes['run'] += $volume;
+        $weekRunEquivalent += $volume;
     }
 
     $periodSessions = attach_debriefs_to_sessions($stmt->fetchAll());
@@ -1573,7 +1819,7 @@ if ($page === 'calendar') {
         }
 
     }
-    $dailyDebriefs = attach_daily_debriefs_to_calendar($sessions, $athleteId, $start, $end);
+    $dailyDebriefs = attach_daily_debriefs_to_calendar($athleteId, $start, $end);
 
     header_html('Calendrier');
 
@@ -1583,7 +1829,7 @@ if ($page === 'calendar') {
 <div class="calendar-head">
     <div>
         <h1>Calendrier — <?=e($a['first_name'].' '.$a['last_name'])?></h1>
-        <p><?=e($month->format('m/Y'))?></p>
+        <p><?=e(format_month_label($month))?></p>
     </div>
 
     <div class="actions">
@@ -1599,14 +1845,14 @@ if ($page === 'calendar') {
 
 <section class="athlete-next">
     <div class="next-session-panel">
-        <span class="eyebrow">Prochaine seance</span>
+        <span class="eyebrow">Prochaine séance</span>
         <?php if($nextSession): ?>
             <strong><?=e($nextSession['title'])?></strong>
             <p><?=e(relative_day_label($nextSession['date']))?> - <?=e(format_full_date($nextSession['date']))?> - <?=e($nextSession['type'])?></p>
-            <a class="btn secondary small" href="index.php?page=session&id=<?=$nextSession['id']?>">Voir le detail</a>
+            <a class="btn secondary small" href="index.php?page=session&id=<?=$nextSession['id']?>">Voir le détail</a>
         <?php else: ?>
-            <strong>Aucune seance programmee</strong>
-            <p>Le planning est vide pour les prochains jours affiches.</p>
+            <strong>Aucune séance programmée</strong>
+            <p>Le planning est vide pour les prochains jours affichés.</p>
         <?php endif; ?>
     </div>
     <div class="mini-metrics week-metrics">
@@ -1618,8 +1864,8 @@ if ($page === 'calendar') {
     </div>
 </section>
 
-<section class="card">
-    <h2>Rappel des allures <small class="muted-text">VMA <?=e($a['vma'])?> km/h</small></h2>
+<details class="card pace-card">
+    <summary><h2>Rappel des allures <small class="muted-text">VMA <?=e($a['vma'])?> km/h</small></h2></summary>
     <div class="pace-grid">
         <?php foreach($athletePaces as $pacePreset):
             $percent = (float)$pacePreset['percent_vma'];
@@ -1633,7 +1879,7 @@ if ($page === 'calendar') {
             </div>
         <?php endforeach; ?>
     </div>
-</section>
+</details>
 
 <div class="calendar iphone-calendar">
     <?php foreach(['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'] as $d): ?>
@@ -1667,17 +1913,17 @@ if ($page === 'calendar') {
 
             <?php if($dailyDebrief): ?>
                 <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Consulter le retour du <?=e(format_full_date($date))?>" title="Retour enregistré">
-                    <span class="debrief-dot debrief-debriefed" aria-label="Retour enregistré"></span>
+                    <span class="debrief-dot debrief-debriefed" aria-hidden="true"></span>
                 </a>
             <?php endif; ?>
 
             <?php foreach($daySessions as $s):
                 $debriefStatus = debrief_summary_status($s);
             ?>
-                <a class="session-pill <?=type_class($s['type'])?> debrief-<?=$debriefStatus?>" href="index.php?page=session&id=<?=$s['id']?>" aria-label="<?=e($s['title'].' - '.debrief_status_label($debriefStatus))?>">
+                <a class="session-pill <?=e(type_class($s['type']))?>" href="index.php?page=session&id=<?=$s['id']?>">
                     <span class="session-title"><?=e($s['title'])?></span>
                     <span class="session-meta"><?=e($s['type'])?><?=session_volume_label($s) ? ' · '.e(session_volume_label($s)) : ''?></span>
-                    <span class="debrief-dot debrief-<?=$debriefStatus?>" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
+                    <span class="debrief-dot debrief-<?=$debriefStatus?>" role="img" aria-label="<?=e(debrief_status_label($debriefStatus))?>"></span>
                 </a>
             <?php endforeach; ?>
         </div>
@@ -1687,9 +1933,9 @@ if ($page === 'calendar') {
     ?>
 </div>
 <section class="card month-agenda">
-    <h2>Seances de la periode</h2>
+    <h2>Séances de la période</h2>
     <?php if(!$monthSessions): ?>
-        <p class="muted-text">Aucune seance sur cette periode.</p>
+        <p class="muted-text">Aucune séance sur cette période.</p>
     <?php endif; ?>
     <div class="agenda-list">
         <?php foreach($monthSessions as $s):
@@ -1732,13 +1978,19 @@ if ($page === 'edit_session') {
         $athleteId = (int)$session['athlete_id'];
     }
 
-    if (!can_access_athlete($athleteId)) exit('Accès refusé');
+    if (!can_access_athlete($athleteId)) deny_access();
     $athletePaces = get_athlete_paces($athleteId);
+    $defaultDate = (string)($_GET['date'] ?? '');
+    if (!valid_date($defaultDate)) $defaultDate = date('Y-m-d');
+    $cancelUrl = $session ? 'index.php?page=session&id=' . (int)$session['id'] : session_calendar_url($athleteId, substr($defaultDate, 0, 7));
 
     header_html($session ? 'Modifier séance' : 'Créer séance');
 ?>
 <section class="card">
-    <h1><?=$session ? 'Modifier' : 'Créer'?> une séance</h1>
+    <div class="debrief-head">
+        <h1><?=$session ? 'Modifier' : 'Créer'?> une séance</h1>
+        <a class="btn secondary small" href="<?=e($cancelUrl)?>">Annuler</a>
+    </div>
 
     <form method="post" enctype="multipart/form-data">
         <input type="hidden" name="csrf" value="<?=csrf_token()?>">
@@ -1751,13 +2003,13 @@ if ($page === 'edit_session') {
 
         <div class="form-grid">
             <div class="field">
-                <label>Date</label>
-                <input type="date" name="date" value="<?=e($session['date'] ?? ($_GET['date'] ?? date('Y-m-d')))?>" required>
+                <label for="session-date">Date</label>
+                <input id="session-date" type="date" name="date" value="<?=e($session['date'] ?? $defaultDate)?>" required>
             </div>
 
             <div class="field">
-                <label>Titre court</label>
-                <input name="title" value="<?=e($session['title'] ?? '')?>" required>
+                <label for="session-title">Titre court</label>
+                <input id="session-title" name="title" value="<?=e($session['title'] ?? '')?>" required>
             </div>
 
             <?php foreach($visibleFields as $fieldKey): ?>
@@ -1796,21 +2048,18 @@ if ($page === 'session') {
     $debriefStatus = debrief_summary_status(['date' => $s['date'], 'debrief' => $debrief]);
     $debriefStorageReady = table_exists('session_debriefs');
     $canEditDebrief = $u['role'] === 'athlete' && $debriefStorageReady;
-    $success = $_SESSION['success'] ?? null;
-    unset($_SESSION['success']);
+    $dailyDebriefSameDay = table_exists('daily_debriefs') ? get_daily_debrief((int)$s['athlete_id'], (string)$s['date']) : empty_debrief();
 
     header_html('Détail séance');
 ?>
-<?php if($success): ?>
-    <div class="success-alert" role="status"><?=e($success)?><?=!empty($debrief['updated_at']) ? ' · '.e($debrief['updated_at']) : ''?></div>
-<?php endif; ?>
+<a class="back-link" href="<?=e(session_calendar_url((int)$s['athlete_id'], substr((string)$s['date'], 0, 7)))?>">← Retour au calendrier</a>
 <section class="card">
     <div class="toolbar">
         <div>
             <h1><?=e($s['title'])?></h1>
             <p>
-                <?=e($s['date'])?> ·
-                <span class="session-pill session-pill-inline <?=type_class($s['type'])?>">
+                <?=e(format_long_date($s['date']))?> ·
+                <span class="session-pill session-pill-inline <?=e(type_class($s['type']))?>">
                     <?=e($s['type'])?>
                 </span>
                 <span class="status-badge status-<?=e($s['status'])?>"><?=e(status_label($s['status']))?></span>
@@ -1822,7 +2071,7 @@ if ($page === 'session') {
             <div class="actions">
                 <a class="btn" href="index.php?page=edit_session&id=<?=$s['id']?>">Modifier</a>
 
-                <form method="post">
+                <form method="post" onsubmit="return confirm('Supprimer cette séance et son débrief ?')">
                     <input type="hidden" name="csrf" value="<?=csrf_token()?>">
                     <input type="hidden" name="action" value="delete_session">
                     <input type="hidden" name="id" value="<?=$s['id']?>">
@@ -1834,12 +2083,12 @@ if ($page === 'session') {
 
     <div class="detail-list">
         <div class="metrics-row">
-            <div class="metric-box"><strong><?=e(intensity_label($s['intensity']))?></strong><span>Intensite</span></div>
+            <div class="metric-box"><strong><?=e(intensity_label($s['intensity']))?></strong><span>Intensité</span></div>
             <div class="metric-box"><strong><?=e(format_distance($s['planned_distance_km']))?></strong><span>Volume prévu</span></div>
-            <div class="metric-box"><strong><?=e(format_distance($s['actual_distance_km']))?></strong><span>Volume réel</span></div>
+            <div class="metric-box"><strong><?=e(format_distance(session_actual_distance($s, $debrief)))?></strong><span>Volume réel</span></div>
             <div class="metric-box"><strong><?=e(pace_label_from_code($sessionPaces, $s['target_pace_code']))?></strong><span>Rythme visé</span></div>
             <div class="metric-box"><strong><?=e(format_pace($pace))?></strong><span>Allure</span></div>
-            <div class="metric-box"><strong><?=e($s['duration_min'] ?: '-')?> min</strong><span>Durée prévue</span></div>
+            <div class="metric-box"><strong><?=e($s['duration_min'] ? $s['duration_min'].' min' : '-')?></strong><span>Durée prévue</span></div>
             <div class="metric-box"><strong><?=e($s['feeling'] ?: '-')?>/10</strong><span>Ressenti</span></div>
             <div class="metric-box"><strong><?=e($s['pain'] ?? '-')?>/10</strong><span>Douleur</span></div>
         </div>
@@ -1850,7 +2099,7 @@ if ($page === 'session') {
             'main_workout' => 'Corps de séance',
             'cooldown' => 'Retour au calme',
             'coach_notes' => 'Conseils du coach',
-            'athlete_feedback' => 'Retour athlete'
+            'athlete_feedback' => 'Retour athlète'
         ] as $k => $label): ?>
             <?php if(($s[$k] ?? '') === '') continue; ?>
             <div class="detail-item">
@@ -1860,11 +2109,14 @@ if ($page === 'session') {
         <?php endforeach; ?>
 
         <?php if($s['external_link']): ?>
-            <a class="btn secondary" href="<?=e($s['external_link'])?>" target="_blank">Lien externe</a>
+            <?php $safeLink = clean_external_link($s['external_link']); ?>
+            <?php if($safeLink): ?>
+                <a class="btn secondary keep-print" href="<?=e($safeLink)?>" target="_blank" rel="noopener noreferrer">Lien externe</a>
+            <?php endif; ?>
         <?php endif; ?>
 
         <?php if($s['attachment_url']): ?>
-            <a class="btn secondary" href="<?=e($s['attachment_url'])?>" target="_blank">Pièce jointe</a>
+            <a class="btn secondary keep-print" href="<?=e($s['attachment_url'])?>" target="_blank" rel="noopener">Pièce jointe</a>
         <?php endif; ?>
     </div>
 </section>
@@ -1875,7 +2127,7 @@ if ($page === 'session') {
             <h2>Débrief de la séance</h2>
             <p class="muted-text">
                 <?php if($debrief['exists']): ?>
-                    Dernière modification : <?=e($debrief['updated_at'] ?: $debrief['created_at'])?>
+                    Dernière modification : <?=e(format_datetime($debrief['updated_at'] ?: $debrief['created_at']))?>
                 <?php else: ?>
                     Aucun débrief enregistré pour le moment.
                 <?php endif; ?>
@@ -1897,16 +2149,11 @@ if ($page === 'session') {
         <?php if($debrief['sensations']): ?>
             <div class="detail-item highlight-item"><strong>Sensations / commentaires</strong><br><?=nl2br(e($debrief['sensations']))?></div>
         <?php endif; ?>
-        <?php if($debrief['weather']): ?>
-            <div class="weather-read">
-                <?php foreach($debrief['weather'] as $weatherKey):
-                    $weather = weather_options()[$weatherKey] ?? null;
-                    if (!$weather) continue;
-                ?>
-                    <span><?=e($weather['icon'])?> <?=e($weather['label'])?></span>
-                <?php endforeach; ?>
-            </div>
-        <?php endif; ?>
+        <?php weather_read_html($debrief['weather']); ?>
+    <?php endif; ?>
+
+    <?php if($dailyDebriefSameDay['exists']): ?>
+        <p class="muted-text">Un retour journalier a aussi été écrit ce jour-là : <a href="index.php?page=daily_debrief&athlete_id=<?=(int)$s['athlete_id']?>&date=<?=e($s['date'])?>">le consulter</a>.</p>
     <?php endif; ?>
 
     <?php if($canEditDebrief): ?>
@@ -1919,7 +2166,7 @@ if ($page === 'session') {
             <button class="btn" type="submit">Enregistrer le débrief</button>
         </form>
     <?php elseif(!$debriefStorageReady): ?>
-        <div class="alert">La migration de débrief n'a pas encore été appliquée. Lance le script SQL ajouté dans migrations.</div>
+        <div class="alert">Le débrief n'est pas encore disponible.</div>
     <?php elseif(!$debrief['exists']): ?>
         <p class="muted-text">Le débrief sera visible ici dès que l'athlète l'aura enregistré.</p>
     <?php endif; ?>
@@ -1936,8 +2183,8 @@ if ($page === 'session') {
             <input type="hidden" name="id" value="<?=$s['id']?>">
 
             <div class="field">
-                <label>Dupliquer à la date</label>
-                <input type="date" name="new_date" required>
+                <label for="duplicate-date">Dupliquer à la date</label>
+                <input id="duplicate-date" type="date" name="new_date" required>
             </div>
 
             <button class="btn secondary">Dupliquer</button>
@@ -1949,8 +2196,8 @@ if ($page === 'session') {
             <input type="hidden" name="id" value="<?=$s['id']?>">
 
             <div class="field">
-                <label>Déplacer à la date</label>
-                <input type="date" name="new_date" required>
+                <label for="move-date">Déplacer à la date</label>
+                <input id="move-date" type="date" name="new_date" value="<?=e($s['date'])?>" required>
             </div>
 
             <button class="btn secondary">Déplacer</button>
@@ -1966,7 +2213,7 @@ if ($page === 'session') {
         <div class="comment">
             <strong><?=e($c['name'])?> a écrit :</strong><br>
             <?=nl2br(e($c['content']))?><br>
-            <small><?=e($c['created_at'])?></small>
+            <small><?=e(format_datetime($c['created_at']))?></small>
         </div>
     <?php endforeach; ?>
 
@@ -1976,8 +2223,8 @@ if ($page === 'session') {
         <input type="hidden" name="session_id" value="<?=$s['id']?>">
 
         <div class="field">
-            <label>Ajouter un commentaire</label>
-            <textarea name="content" required></textarea>
+            <label for="comment-content">Ajouter un commentaire</label>
+            <textarea id="comment-content" name="content" required></textarea>
         </div>
 
         <button class="btn">Envoyer</button>
@@ -1988,5 +2235,5 @@ if ($page === 'session') {
     exit;
 }
 
-http_response_code(404);
-echo 'Page introuvable';
+error_page('Page introuvable', 404);
+
