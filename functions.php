@@ -217,8 +217,24 @@ function login_user(array $user): void {
         'id' => (int)$user['id'],
         'name' => $user['name'],
         'email' => $user['email'],
-        'role' => $user['role']
+        'role' => $user['role'],
+        'auth_v' => 2
     ];
+}
+
+// Sessions restored by the old remember-me code stored the auth_tokens id as user id.
+function repair_legacy_session_user(): void {
+    $user = current_user();
+    if (!$user || ($user['auth_v'] ?? null) === 2) return;
+
+    $stmt = db()->prepare('SELECT id, name, email, role FROM users WHERE email=? LIMIT 1');
+    $stmt->execute([$user['email'] ?? '']);
+    $row = $stmt->fetch();
+    if ($row) {
+        login_user($row);
+    } else {
+        unset($_SESSION['user']);
+    }
 }
 
 function remember_cookie_options(int $expires): array {
@@ -279,7 +295,7 @@ function restore_remembered_login(): void {
         return;
     }
 
-    login_user($token);
+    login_user(['id' => $token['user_id']] + $token);
 }
 
 function nullable_int($value) {

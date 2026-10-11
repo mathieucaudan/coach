@@ -18,6 +18,7 @@ if ($debugEnabled) {
 session_start();
 require_once __DIR__ . '/functions.php';
 bootstrap_configured_super_admin();
+repair_legacy_session_user();
 restore_remembered_login();
 
 $page = $_GET['page'] ?? 'home';
