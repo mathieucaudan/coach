@@ -1353,3 +1353,12 @@ p{
 @supports not selector(:has(*)){
     .weather-choice.selected{border-color:var(--primary);background:#f2fbf8}
 }
+
+/* Saved debrief: "Modifier" opens the pre-filled form below, "Supprimer" stays on the first row. */
+.debrief-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:10px;margin-top:16px}
+.debrief-actions form.debrief-delete{margin:0}
+.debrief-edit > summary{list-style:none;cursor:pointer}
+.debrief-edit > summary::-webkit-details-marker{display:none}
+.debrief-edit[open]{flex-basis:100%;order:2}
+.debrief-edit[open] > summary{display:none}
+.debrief-edit .debrief-form{margin-top:4px}

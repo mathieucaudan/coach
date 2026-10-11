@@ -821,6 +821,18 @@ function save_session_debrief(array $session, array $post): void {
     )->execute($values);
 }
 
+function delete_session_debrief(array $session): void {
+    if (!table_exists('session_debriefs')) return;
+    assert_athlete_owns_athlete_id((int)$session['athlete_id']);
+    db()->prepare('DELETE FROM session_debriefs WHERE session_id=?')->execute([(int)$session['id']]);
+}
+
+function delete_daily_debrief(int $athleteId, string $date): void {
+    if (!table_exists('daily_debriefs')) return;
+    assert_athlete_owns_athlete_id($athleteId);
+    db()->prepare('DELETE FROM daily_debriefs WHERE athlete_id=? AND date=?')->execute([$athleteId, $date]);
+}
+
 function assert_athlete_owns_athlete_id(int $athleteId): void {
     $user = current_user();
     if (!$user || $user['role'] !== 'athlete') {

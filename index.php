@@ -472,6 +472,21 @@ if ($action) {
         redirect('index.php?page=session&id='.$s['id']);
     }
 
+    if ($action === 'delete_debrief') {
+        $s = get_session_checked((int)$_POST['session_id']);
+        delete_session_debrief($s);
+        $_SESSION['success'] = 'Débrief supprimé.';
+        redirect('index.php?page=session&id='.$s['id']);
+    }
+
+    if ($action === 'delete_daily_debrief') {
+        $athleteId = (int)$_POST['athlete_id'];
+        $date = require_valid_date($_POST['date'] ?? '');
+        delete_daily_debrief($athleteId, $date);
+        $_SESSION['success'] = 'Retour journalier supprimé.';
+        redirect(session_calendar_url($athleteId, substr($date, 0, 7)));
+    }
+
     if ($action === 'save_daily_debrief') {
         $athleteId = (int)$_POST['athlete_id'];
         $date = require_valid_date($_POST['date'] ?? '');
@@ -629,7 +644,32 @@ function debrief_form_fields(array $debrief): void {
 <?php
 }
 
+// A saved debrief is shown as a summary with "Modifier" (opens the pre-filled form)
+// and "Supprimer"; a new one shows the form directly.
+function debrief_edit_block(bool $exists, string $formHtml, string $deleteConfirm, array $deleteFields): void {
+    if (!$exists) {
+        echo $formHtml;
+        return;
+    }
+?>
+    <div class="debrief-actions">
+        <details class="debrief-edit">
+            <summary class="btn secondary">Modifier</summary>
+            <?=$formHtml?>
+        </details>
+        <form method="post" class="debrief-delete" onsubmit="return confirm('<?=e($deleteConfirm)?>')">
+            <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+            <?php foreach($deleteFields as $name => $value): ?>
+                <input type="hidden" name="<?=e($name)?>" value="<?=e($value)?>">
+            <?php endforeach; ?>
+            <button class="btn danger" type="submit">Supprimer</button>
+        </form>
+    </div>
+<?php
+}
+
 function athlete_pace_fields(array $paces): void {
+
 ?>
     <div class="field full">
         <label>Repères d'allure</label>
@@ -1112,6 +1152,7 @@ if ($page === 'daily_debrief') {
     <?php endif; ?>
 
     <?php if($canEditDebrief): ?>
+        <?php ob_start(); ?>
         <form class="debrief-form" method="post">
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="save_daily_debrief">
@@ -1120,6 +1161,13 @@ if ($page === 'daily_debrief') {
             <?php debrief_form_fields($debrief); ?>
             <button class="btn" type="submit">Enregistrer le retour</button>
         </form>
+        <?php
+        debrief_edit_block($debrief['exists'], (string)ob_get_clean(), 'Supprimer ce retour journalier ?', [
+            'action' => 'delete_daily_debrief',
+            'athlete_id' => $athleteId,
+            'date' => $date,
+        ]);
+        ?>
     <?php elseif(!$debriefStorageReady): ?>
         <div class="alert">Les retours journaliers ne sont pas encore disponibles.</div>
     <?php elseif(!$debrief['exists']): ?>
@@ -2157,6 +2205,7 @@ if ($page === 'session') {
     <?php endif; ?>
 
     <?php if($canEditDebrief): ?>
+        <?php ob_start(); ?>
         <form class="debrief-form" method="post">
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="save_debrief">
@@ -2165,6 +2214,12 @@ if ($page === 'session') {
 
             <button class="btn" type="submit">Enregistrer le débrief</button>
         </form>
+        <?php
+        debrief_edit_block($debrief['exists'], (string)ob_get_clean(), 'Supprimer ce débrief ?', [
+            'action' => 'delete_debrief',
+            'session_id' => (int)$s['id'],
+        ]);
+        ?>
     <?php elseif(!$debriefStorageReady): ?>
         <div class="alert">Le débrief n'est pas encore disponible.</div>
     <?php elseif(!$debrief['exists']): ?>
