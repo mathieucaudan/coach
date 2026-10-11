@@ -116,6 +116,7 @@ function csrf_token(): string {
     }
     if (($_COOKIE['csrf_token'] ?? '') !== $_SESSION['csrf'] && !headers_sent()) {
         setcookie('csrf_token', $_SESSION['csrf'], remember_cookie_options(time() + 60 * 60 * 24 * 30));
+        $_COOKIE['csrf_token'] = $_SESSION['csrf'];
     }
     return $_SESSION['csrf'];
 }
