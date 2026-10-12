@@ -780,16 +780,7 @@ function save_session_debrief(array $session, array $post): void {
         throw new RuntimeException('Migration session_debriefs manquante.');
     }
 
-    $user = current_user();
-    if (!$user || $user['role'] !== 'athlete') {
-        error_page('Seul le compte athlète peut modifier le débrief.', 403);
-    }
-
-    $athlete = athlete_for_user((int)$user['id']);
-    if (!$athlete || (int)$athlete['id'] !== (int)$session['athlete_id']) {
-        deny_access();
-    }
-
+    assert_can_edit_debrief((int)$session['athlete_id'], get_debrief_for_session((int)$session['id'])['exists']);
     $payload = parse_debrief_payload($post);
 
     $hasDistance = table_has_column('session_debriefs', 'actual_distance_km');
@@ -823,25 +814,23 @@ function save_session_debrief(array $session, array $post): void {
 
 function delete_session_debrief(array $session): void {
     if (!table_exists('session_debriefs')) return;
-    assert_athlete_owns_athlete_id((int)$session['athlete_id']);
+    assert_can_edit_debrief((int)$session['athlete_id'], true);
     db()->prepare('DELETE FROM session_debriefs WHERE session_id=?')->execute([(int)$session['id']]);
 }
 
 function delete_daily_debrief(int $athleteId, string $date): void {
     if (!table_exists('daily_debriefs')) return;
-    assert_athlete_owns_athlete_id($athleteId);
+    assert_can_edit_debrief($athleteId, true);
     db()->prepare('DELETE FROM daily_debriefs WHERE athlete_id=? AND date=?')->execute([$athleteId, $date]);
 }
 
-function assert_athlete_owns_athlete_id(int $athleteId): void {
+// The athlete writes their own debriefs; their coach (or a super admin) may edit or
+// delete an existing one but not create it on the athlete's behalf.
+function assert_can_edit_debrief(int $athleteId, bool $exists): void {
     $user = current_user();
-    if (!$user || $user['role'] !== 'athlete') {
-        error_page('Seul le compte athlète peut modifier ce retour.', 403);
-    }
-
-    $athlete = athlete_for_user((int)$user['id']);
-    if (!$athlete || (int)$athlete['id'] !== $athleteId) {
-        deny_access();
+    if (!$user || !can_access_athlete($athleteId)) deny_access();
+    if ($user['role'] !== 'athlete' && !$exists) {
+        error_page('Seul le compte athlète peut créer ce retour.', 403);
     }
 }
 
@@ -873,7 +862,7 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
         throw new InvalidArgumentException('Date invalide.');
     }
 
-    assert_athlete_owns_athlete_id($athleteId);
+    assert_can_edit_debrief($athleteId, get_daily_debrief($athleteId, $date)['exists']);
     $payload = parse_debrief_payload($post);
 
     $hasDistance = table_has_column('daily_debriefs', 'actual_distance_km');

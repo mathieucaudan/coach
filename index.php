@@ -1114,7 +1114,7 @@ if ($page === 'daily_debrief') {
     $daySessions = $stmt->fetchAll();
     if ($daySessions && !$debrief['exists']) redirect('index.php?page=session&id='.(int)$daySessions[0]['id']);
 
-    $canEditDebrief = $u['role'] === 'athlete' && $debriefStorageReady;
+    $canEditDebrief = $debriefStorageReady && ($u['role'] === 'athlete' || $debrief['exists']);
 
     header_html('Retour journalier');
 ?>
@@ -2095,7 +2095,7 @@ if ($page === 'session') {
     $debrief = get_debrief_for_session((int)$s['id']);
     $debriefStatus = debrief_summary_status(['date' => $s['date'], 'debrief' => $debrief]);
     $debriefStorageReady = table_exists('session_debriefs');
-    $canEditDebrief = $u['role'] === 'athlete' && $debriefStorageReady;
+    $canEditDebrief = $debriefStorageReady && ($u['role'] === 'athlete' || $debrief['exists']);
     $dailyDebriefSameDay = table_exists('daily_debriefs') ? get_daily_debrief((int)$s['athlete_id'], (string)$s['date']) : empty_debrief();
 
     header_html('Détail séance');
