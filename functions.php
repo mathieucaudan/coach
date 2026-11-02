@@ -236,6 +236,7 @@ function athlete_select_sql(string $alias = 'a'): string {
         sql_optional('athletes', $alias, 'goal', "''") . ' AS goal',
         sql_optional('athletes', $alias, 'vma', '15') . ' AS vma',
         sql_optional('athletes', $alias, 'notes', "''") . ' AS notes',
+        sql_optional('athletes', $alias, 'wellness_tracking', '0') . ' AS wellness_tracking',
     ]);
 }
 
@@ -665,6 +666,9 @@ function empty_debrief(): array {
         'temperature_c' => null,
         'lactates' => '',
         'actual_distance_km' => null,
+        'duration_min' => null,
+        'rpe' => null,
+        'session_comment' => '',
         'created_at' => null,
         'updated_at' => null,
         'exists' => false,
@@ -688,10 +692,27 @@ function normalize_debrief(array $row): array {
         'temperature_c' => $row['temperature_c'] ?? null,
         'lactates' => $row['lactates'] ?? '',
         'actual_distance_km' => $row['actual_distance_km'] ?? null,
+        'duration_min' => isset($row['duration_min']) ? (int)$row['duration_min'] : null,
+        'rpe' => isset($row['rpe']) ? (int)$row['rpe'] : null,
+        'session_comment' => $row['session_comment'] ?? '',
         'created_at' => $row['created_at'] ?? null,
         'updated_at' => $row['updated_at'] ?? null,
         'exists' => true,
     ];
+}
+
+// Session load (sRPE method): duration in minutes × RPE, in arbitrary units.
+function debrief_load(array $debrief): ?int {
+    if ($debrief['duration_min'] === null || $debrief['rpe'] === null) return null;
+    return $debrief['duration_min'] * $debrief['rpe'];
+}
+
+// Load / wellness tracking is off by default; the coach turns it on per athlete.
+function athlete_tracking_enabled(int $athleteId): bool {
+    if (!table_has_column('athletes', 'wellness_tracking')) return false;
+    $stmt = db()->prepare('SELECT wellness_tracking FROM athletes WHERE id=?');
+    $stmt->execute([$athleteId]);
+    return (bool)$stmt->fetchColumn();
 }
 
 function get_debrief_for_session(int $sessionId): array {
@@ -783,7 +804,6 @@ function save_session_debrief(array $session, array $post): void {
     assert_can_edit_debrief((int)$session['athlete_id'], get_debrief_for_session((int)$session['id'])['exists']);
     $payload = parse_debrief_payload($post);
 
-    $hasDistance = table_has_column('session_debriefs', 'actual_distance_km');
     $columns = 'session_id,result,difficulty,sensations,weather,temperature_c,lactates';
     $placeholders = '?,?,?,?,?,?,?';
     $updates = 'result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
@@ -797,13 +817,7 @@ function save_session_debrief(array $session, array $post): void {
         $payload['temperature_c'],
         $payload['lactates'],
     ];
-
-    if ($hasDistance) {
-        $columns .= ',actual_distance_km';
-        $placeholders .= ',?';
-        $updates .= ', actual_distance_km=VALUES(actual_distance_km)';
-        $values[] = $payload['actual_distance_km'];
-    }
+    append_optional_debrief_columns('session_debriefs', $payload, $post, $columns, $placeholders, $updates, $values);
 
     db()->prepare(
         'INSERT INTO session_debriefs (' . $columns . ',created_at,updated_at)
@@ -842,8 +856,13 @@ function parse_debrief_payload(array $post): array {
     $temperature = $post['temperature_c'] ?? null;
     $temperature = ($temperature === '' || $temperature === null) ? null : max(-30, min(55, (float)$temperature));
     $actualDistance = nullable_float($post['actual_distance_km'] ?? null);
+    $duration = nullable_int($post['duration_min'] ?? null);
+    $rpe = nullable_int($post['rpe'] ?? null);
 
     return [
+        'duration_min' => $duration === null ? null : max(0, min(1440, $duration)),
+        'rpe' => $rpe === null ? null : max(0, min(10, $rpe)),
+        'session_comment' => trim((string)($post['session_comment'] ?? '')),
         'result' => trim((string)($post['result'] ?? '')),
         'difficulty' => $difficulty,
         'sensations' => trim((string)($post['sensations'] ?? '')),
@@ -865,7 +884,6 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
     assert_can_edit_debrief($athleteId, get_daily_debrief($athleteId, $date)['exists']);
     $payload = parse_debrief_payload($post);
 
-    $hasDistance = table_has_column('daily_debriefs', 'actual_distance_km');
     $columns = 'athlete_id,date,result,difficulty,sensations,weather,temperature_c,lactates';
     $placeholders = '?,?,?,?,?,?,?,?';
     $updates = 'result=VALUES(result), difficulty=VALUES(difficulty), sensations=VALUES(sensations),
@@ -880,18 +898,108 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
         $payload['temperature_c'],
         $payload['lactates'],
     ];
-
-    if ($hasDistance) {
-        $columns .= ',actual_distance_km';
-        $placeholders .= ',?';
-        $updates .= ', actual_distance_km=VALUES(actual_distance_km)';
-        $values[] = $payload['actual_distance_km'];
-    }
+    append_optional_debrief_columns('daily_debriefs', $payload, $post, $columns, $placeholders, $updates, $values);
 
     db()->prepare(
         'INSERT INTO daily_debriefs (' . $columns . ',created_at,updated_at)
          VALUES (' . $placeholders . ',NOW(),NOW())
          ON DUPLICATE KEY UPDATE ' . $updates . ', updated_at=NOW()'
+    )->execute($values);
+}
+
+// Adds the columns older schemas may lack. The load fields are only written when the
+// form showed them, so turning tracking off never wipes values already saved.
+function append_optional_debrief_columns(string $table, array $payload, array $post, string &$columns, string &$placeholders, string &$updates, array &$values): void {
+    $optional = ['actual_distance_km'];
+    if (!empty($post['load_fields'])) {
+        array_push($optional, 'duration_min', 'rpe', 'session_comment');
+    }
+
+    foreach ($optional as $column) {
+        if (!table_has_column($table, $column)) continue;
+        $columns .= ',' . $column;
+        $placeholders .= ',?';
+        $updates .= ', ' . $column . '=VALUES(' . $column . ')';
+        $values[] = $payload[$column];
+    }
+}
+
+function wellness_questions(): array {
+    return [
+        'sleep' => ['label' => 'Sommeil', 'help' => '0 très mauvais · 10 excellent'],
+        'energy' => ['label' => 'Énergie', 'help' => '0 épuisé · 10 plein d\'énergie'],
+        'soreness' => ['label' => 'Courbatures', 'help' => '0 aucune · 10 très fortes'],
+        'stress' => ['label' => 'Stress', 'help' => '0 aucun · 10 très stressé'],
+        'motivation' => ['label' => 'Motivation', 'help' => '0 aucune · 10 très motivé'],
+    ];
+}
+
+function daily_wellness_ready(): bool {
+    return table_exists('daily_wellness');
+}
+
+function empty_wellness(): array {
+    return array_fill_keys(array_keys(wellness_questions()), null) + [
+        'menstrual_cycle' => null,
+        'updated_at' => null,
+        'exists' => false,
+    ];
+}
+
+function normalize_wellness(array $row): array {
+    $wellness = ['date' => $row['date'], 'updated_at' => $row['updated_at'] ?? null, 'exists' => true];
+    foreach (array_keys(wellness_questions()) as $key) {
+        $wellness[$key] = isset($row[$key]) ? (int)$row[$key] : null;
+    }
+    $wellness['menstrual_cycle'] = isset($row['menstrual_cycle']) ? (bool)$row['menstrual_cycle'] : null;
+    return $wellness;
+}
+
+function get_daily_wellness(int $athleteId, string $date): array {
+    if (!daily_wellness_ready()) return empty_wellness();
+    if (!can_access_athlete($athleteId)) deny_access();
+
+    $stmt = db()->prepare('SELECT * FROM daily_wellness WHERE athlete_id=? AND date=? LIMIT 1');
+    $stmt->execute([$athleteId, $date]);
+    $row = $stmt->fetch();
+    return $row ? normalize_wellness($row) : empty_wellness();
+}
+
+// Questionnaires keyed by date (Y-m-d), most recent first.
+function get_wellness_between(int $athleteId, string $start, string $end): array {
+    if (!daily_wellness_ready()) return [];
+
+    $stmt = db()->prepare('SELECT * FROM daily_wellness WHERE athlete_id=? AND date BETWEEN ? AND ? ORDER BY date DESC');
+    $stmt->execute([$athleteId, $start, $end]);
+    $wellness = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $wellness[$row['date']] = normalize_wellness($row);
+    }
+    return $wellness;
+}
+
+function save_daily_wellness(int $athleteId, string $date, array $post): void {
+    if (!daily_wellness_ready()) {
+        throw new RuntimeException('Migration daily_wellness manquante.');
+    }
+    if ($date > date('Y-m-d')) {
+        throw new InvalidArgumentException('Le questionnaire ne peut pas être rempli à l\'avance.');
+    }
+    assert_can_edit_debrief($athleteId, get_daily_wellness($athleteId, $date)['exists']);
+
+    $values = [$athleteId, $date];
+    foreach (array_keys(wellness_questions()) as $key) {
+        $score = nullable_int($post[$key] ?? null);
+        $values[] = $score === null ? null : max(0, min(10, $score));
+    }
+    $cycle = $post['menstrual_cycle'] ?? '';
+    $values[] = $cycle === 'yes' ? 1 : ($cycle === 'no' ? 0 : null);
+
+    db()->prepare(
+        'INSERT INTO daily_wellness (athlete_id,date,sleep,energy,soreness,stress,motivation,menstrual_cycle,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())
+         ON DUPLICATE KEY UPDATE sleep=VALUES(sleep), energy=VALUES(energy), soreness=VALUES(soreness),
+             stress=VALUES(stress), motivation=VALUES(motivation), menstrual_cycle=VALUES(menstrual_cycle), updated_at=NOW()'
     )->execute($values);
 }
 
@@ -972,6 +1080,7 @@ function run_pending_migrations(): array {
         add_column_if_missing('athletes', 'goal', 'TEXT NULL', $applied);
         add_column_if_missing('athletes', 'vma', 'DECIMAL(4,1) NOT NULL DEFAULT 15', $applied);
         add_column_if_missing('athletes', 'notes', 'TEXT NULL', $applied);
+        add_column_if_missing('athletes', 'wellness_tracking', 'TINYINT(1) NOT NULL DEFAULT 0', $applied);
     }
     // Legacy schemas declare sessions.type as an ENUM, which silently blanks new types like vélo.
     if (table_exists('sessions') && column_data_type('sessions', 'type') === 'enum') {
@@ -992,11 +1101,12 @@ function run_pending_migrations(): array {
         add_column_if_missing('sessions', 'pain', 'TINYINT NULL', $applied);
         add_column_if_missing('sessions', 'athlete_feedback', 'TEXT NULL', $applied);
     }
-    if (table_exists('session_debriefs')) {
-        add_column_if_missing('session_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL', $applied);
-    }
-    if (table_exists('daily_debriefs')) {
-        add_column_if_missing('daily_debriefs', 'actual_distance_km', 'DECIMAL(6,2) NULL', $applied);
+    foreach (['session_debriefs', 'daily_debriefs'] as $debriefTable) {
+        if (!table_exists($debriefTable)) continue;
+        add_column_if_missing($debriefTable, 'actual_distance_km', 'DECIMAL(6,2) NULL', $applied);
+        add_column_if_missing($debriefTable, 'duration_min', 'INT NULL', $applied);
+        add_column_if_missing($debriefTable, 'rpe', 'TINYINT UNSIGNED NULL', $applied);
+        add_column_if_missing($debriefTable, 'session_comment', 'TEXT NULL', $applied);
     }
 
     if (!table_exists('athlete_paces')) {
@@ -1074,6 +1184,9 @@ function run_pending_migrations(): array {
                 temperature_c DECIMAL(4,1) NULL,
                 lactates TEXT NULL,
                 actual_distance_km DECIMAL(6,2) NULL,
+                duration_min INT NULL,
+                rpe TINYINT UNSIGNED NULL,
+                session_comment TEXT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
@@ -1101,6 +1214,9 @@ function run_pending_migrations(): array {
                 temperature_c DECIMAL(4,1) NULL,
                 lactates TEXT NULL,
                 actual_distance_km DECIMAL(6,2) NULL,
+                duration_min INT NULL,
+                rpe TINYINT UNSIGNED NULL,
+                session_comment TEXT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
@@ -1129,6 +1245,31 @@ function run_pending_migrations(): array {
         );
         db_schema(true);
         $applied[] = 'login_attempts';
+    }
+
+    if (!table_exists('daily_wellness')) {
+        db()->exec(
+            'CREATE TABLE daily_wellness (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                athlete_id INT NOT NULL,
+                date DATE NOT NULL,
+                sleep TINYINT UNSIGNED NULL,
+                energy TINYINT UNSIGNED NULL,
+                soreness TINYINT UNSIGNED NULL,
+                stress TINYINT UNSIGNED NULL,
+                motivation TINYINT UNSIGNED NULL,
+                menstrual_cycle TINYINT(1) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_daily_wellness_athlete_date (athlete_id, date),
+                CONSTRAINT fk_daily_wellness_athlete
+                    FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        db_schema(true);
+        $applied[] = 'daily_wellness';
     }
 
     add_index_if_missing('sessions', 'idx_sessions_athlete_date', 'athlete_id, date', $applied);

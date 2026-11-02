@@ -195,7 +195,8 @@ if ($action) {
             'level' => trim($_POST['level'] ?? 'Intermédiaire'),
             'goal' => trim($_POST['goal'] ?? ''),
             'vma' => max(5, min(30, nullable_float($_POST['vma'] ?? null) ?? 15)),
-            'notes' => trim($_POST['notes'] ?? '')
+            'notes' => trim($_POST['notes'] ?? ''),
+            'wellness_tracking' => empty($_POST['wellness_tracking']) ? 0 : 1,
         ]);
         sync_athlete_coaches($athleteId, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
         sync_athlete_paces($athleteId, $_POST['paces'] ?? []);
@@ -256,7 +257,8 @@ if ($action) {
             'level' => trim($_POST['level'] ?? 'Intermédiaire'),
             'goal' => trim($_POST['goal'] ?? ''),
             'vma' => max(5, min(30, nullable_float($_POST['vma'] ?? null) ?? 15)),
-            'notes' => trim($_POST['notes'] ?? '')
+            'notes' => trim($_POST['notes'] ?? ''),
+            'wellness_tracking' => empty($_POST['wellness_tracking']) ? 0 : 1,
         ], 'id=?', [$id]);
         sync_athlete_coaches($id, $primaryCoachId, $secondaryCoachId);
         sync_athlete_paces($id, $_POST['paces'] ?? []);
@@ -495,6 +497,14 @@ if ($action) {
         redirect('index.php?page=daily_debrief&athlete_id='.$athleteId.'&date='.$date);
     }
 
+    if ($action === 'save_wellness') {
+        $athleteId = (int)$_POST['athlete_id'];
+        $date = require_valid_date($_POST['date'] ?? '');
+        save_daily_wellness($athleteId, $date, $_POST);
+        $_SESSION['success'] = 'Questionnaire enregistré.';
+        redirect('index.php?page=wellness&athlete_id='.$athleteId.'&date='.$date);
+    }
+
     if ($action === 'quick_session') {
         require_role('coach');
         $athleteId = (int)$_POST['athlete_id'];
@@ -581,13 +591,61 @@ document.addEventListener('submit', function (event) {
 window.addEventListener('pageshow', function () {
     document.querySelectorAll('form[data-submitted]').forEach(function (form) { delete form.dataset.submitted; });
 });
+// An untouched slider has no name, so it is saved as "not answered" instead of its midpoint.
+document.addEventListener('input', function (event) {
+    var field = event.target;
+    if (field.matches('input[type=range][data-name]')) {
+        field.name = field.dataset.name;
+        var shown = document.getElementById(field.id + '-value');
+        if (shown) shown.textContent = field.value;
+    }
+    var load = field.form && field.form.querySelector('[data-load]');
+    if (!load) return;
+    var duration = parseInt(field.form.querySelector('[name=duration_min]').value, 10);
+    var rpe = field.form.querySelector('[data-name=rpe]');
+    load.textContent = duration >= 0 && rpe.name ? (duration * parseInt(rpe.value, 10)) + ' UA' : '-';
+});
 </script>
 </body></html>
 <?php
 }
 
-function debrief_form_fields(array $debrief): void {
+// A 0-10 slider; without a saved value it starts unnamed (see the footer script).
+function score_slider(string $id, string $name, string $label, ?int $value, string $help): void {
 ?>
+    <div class="field score-field">
+        <label for="<?=e($id)?>"><?=e($label)?> <strong class="score-value" id="<?=e($id)?>-value"><?=$value === null ? '-' : $value?></strong><small>/10</small></label>
+        <input id="<?=e($id)?>" type="range" min="0" max="10" step="1" data-name="<?=e($name)?>" value="<?=$value ?? 5?>" <?=$value === null ? '' : 'name="'.e($name).'"'?>>
+        <p class="scale-help"><?=e($help)?></p>
+    </div>
+<?php
+}
+
+function debrief_form_fields(array $debrief, bool $loadFields = false): void {
+    if ($loadFields):
+        $load = debrief_load($debrief);
+?>
+    <fieldset class="load-field">
+        <legend>Charge de séance</legend>
+        <input type="hidden" name="load_fields" value="1">
+        <div class="form-grid">
+            <div class="field">
+                <label for="debrief-duration">Durée de séance (min)</label>
+                <input id="debrief-duration" type="number" inputmode="numeric" name="duration_min" min="0" max="1440" step="1" value="<?=e($debrief['duration_min'] ?? '')?>">
+            </div>
+            <div class="field">
+                <span class="field-label">Charge (auto)</span>
+                <strong class="load-value" data-load><?=$load === null ? '-' : $load.' UA'?></strong>
+                <p class="scale-help">Durée × RPE</p>
+            </div>
+        </div>
+        <?php score_slider('debrief-rpe', 'rpe', 'RPE', $debrief['rpe'], '0 repos · 5 difficile · 10 effort maximal'); ?>
+        <div class="field full">
+            <label for="debrief-session-comment">Commentaire de séance</label>
+            <textarea id="debrief-session-comment" name="session_comment"><?=e($debrief['session_comment'])?></textarea>
+        </div>
+    </fieldset>
+<?php endif; ?>
     <div class="field full">
         <label for="debrief-result">Chronos / résultat</label>
         <textarea id="debrief-result" name="result" placeholder="Ex : 10 km en 42'15, footing 1h15 - 14,2 km"><?=e($debrief['result'])?></textarea>
@@ -664,6 +722,35 @@ function debrief_edit_block(bool $exists, string $formHtml, string $deleteConfir
             <?php endforeach; ?>
             <button class="btn danger" type="submit">Supprimer</button>
         </form>
+    </div>
+<?php
+}
+
+function debrief_load_summary(array $debrief): void {
+    if ($debrief['duration_min'] === null && $debrief['rpe'] === null && $debrief['session_comment'] === '') return;
+    $load = debrief_load($debrief);
+?>
+    <div class="debrief-summary">
+        <div class="metric-box"><strong><?=e($debrief['duration_min'] !== null ? $debrief['duration_min'].' min' : '-')?></strong><span>Durée</span></div>
+        <div class="metric-box"><strong><?=e($debrief['rpe'] ?? '-')?>/10</strong><span>RPE</span></div>
+        <div class="metric-box"><strong><?=e($load !== null ? $load.' UA' : '-')?></strong><span>Charge (durée × RPE)</span></div>
+    </div>
+    <?php if($debrief['session_comment'] !== ''): ?>
+        <div class="detail-item highlight-item"><strong>Commentaire de séance</strong><br><?=nl2br(e($debrief['session_comment']))?></div>
+    <?php endif; ?>
+<?php
+}
+
+function wellness_tracking_field(bool $checked): void {
+?>
+    <div class="wellness-toggle">
+        <label class="setting-choice">
+            <input type="checkbox" name="wellness_tracking" value="1" <?=$checked ? 'checked' : ''?>>
+            <span>Suivi charge &amp; bien-être <small>(RPE, durée, questionnaire quotidien)</small></span>
+        </label>
+        <?php if(!table_has_column('athletes', 'wellness_tracking')): ?>
+            <small>Disponible après passage par la page Migrations.</small>
+        <?php endif; ?>
     </div>
 <?php
 }
@@ -1142,6 +1229,7 @@ if ($page === 'daily_debrief') {
             <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
             <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
         </div>
+        <?php debrief_load_summary($debrief); ?>
         <?php if($debrief['result']): ?>
             <div class="detail-item highlight-item"><strong>Chronos / résultat</strong><br><?=nl2br(e($debrief['result']))?></div>
         <?php endif; ?>
@@ -1158,7 +1246,7 @@ if ($page === 'daily_debrief') {
             <input type="hidden" name="action" value="save_daily_debrief">
             <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
             <input type="hidden" name="date" value="<?=e($date)?>">
-            <?php debrief_form_fields($debrief); ?>
+            <?php debrief_form_fields($debrief, !empty($a['wellness_tracking'])); ?>
             <button class="btn" type="submit">Enregistrer le retour</button>
         </form>
         <?php
@@ -1174,6 +1262,103 @@ if ($page === 'daily_debrief') {
         <p class="muted-text">Aucun retour enregistré pour cette journée.</p>
     <?php endif; ?>
 </section>
+<?php
+    footer_html();
+    exit;
+}
+
+if ($page === 'wellness') {
+    $athleteId = (int)($_GET['athlete_id'] ?? 0);
+    $date = (string)($_GET['date'] ?? date('Y-m-d'));
+    if (!valid_date($date) || !can_access_athlete($athleteId)) deny_access();
+
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
+    $stmt->execute([$athleteId]);
+    $a = $stmt->fetch();
+
+    $storageReady = daily_wellness_ready();
+    $wellness = get_daily_wellness($athleteId, $date);
+    $questions = wellness_questions();
+    $trackingEnabled = !empty($a['wellness_tracking']);
+    $canEdit = $storageReady && $date <= date('Y-m-d')
+        && (($u['role'] === 'athlete' && $trackingEnabled) || $wellness['exists']);
+    $history = get_wellness_between($athleteId, (new DateTime($date))->modify('-13 days')->format('Y-m-d'), $date);
+    $prevDate = (new DateTime($date))->modify('-1 day')->format('Y-m-d');
+    $nextDate = (new DateTime($date))->modify('+1 day')->format('Y-m-d');
+
+    header_html('Questionnaire du jour');
+?>
+<section class="card debrief-card">
+    <div class="debrief-head">
+        <div>
+            <h1>Questionnaire du <?=e(format_full_date($date))?></h1>
+            <p class="muted-text"><?=e($a['first_name'].' '.$a['last_name'])?><?=$wellness['exists'] ? ' · Dernière modification : '.e(format_datetime($wellness['updated_at'])) : ''?></p>
+        </div>
+        <div class="actions">
+            <a class="btn secondary small" href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=$prevDate?>" aria-label="Jour précédent">←</a>
+            <?php if($nextDate <= date('Y-m-d')): ?>
+                <a class="btn secondary small" href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=$nextDate?>" aria-label="Jour suivant">→</a>
+            <?php endif; ?>
+            <a class="btn secondary small" href="<?=e(session_calendar_url($athleteId, substr($date, 0, 7)))?>">Retour calendrier</a>
+        </div>
+    </div>
+
+    <?php if(!$storageReady): ?>
+        <div class="alert">Le questionnaire sera disponible après passage par la page Migrations.</div>
+    <?php elseif(!$trackingEnabled && !$wellness['exists']): ?>
+        <p class="muted-text">Le suivi bien-être n'est pas activé pour cet athlète<?=$u['role'] === 'athlete' ? '' : ' : active-le depuis « Modifier le profil »'?>.</p>
+    <?php elseif($canEdit): ?>
+        <form class="debrief-form" method="post">
+            <input type="hidden" name="csrf" value="<?=csrf_token()?>">
+            <input type="hidden" name="action" value="save_wellness">
+            <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
+            <input type="hidden" name="date" value="<?=e($date)?>">
+
+            <?php foreach($questions as $key => $question): ?>
+                <?php score_slider('wellness-'.$key, $key, $question['label'], $wellness[$key], $question['help']); ?>
+            <?php endforeach; ?>
+
+            <fieldset class="load-field">
+                <legend>Cycle menstruel (règles aujourd'hui)</legend>
+                <div class="choice-row">
+                    <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="yes" <?=$wellness['menstrual_cycle'] === true ? 'checked' : ''?>><span>Oui</span></label>
+                    <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="no" <?=$wellness['menstrual_cycle'] === false ? 'checked' : ''?>><span>Non</span></label>
+                    <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="" <?=$wellness['menstrual_cycle'] === null ? 'checked' : ''?>><span>Non concerné(e)</span></label>
+                </div>
+            </fieldset>
+
+            <button class="btn" type="submit">Enregistrer le questionnaire</button>
+        </form>
+    <?php elseif(!$wellness['exists']): ?>
+        <p class="muted-text">Questionnaire non rempli pour cette journée.</p>
+    <?php endif; ?>
+</section>
+
+<?php if($history): ?>
+<section class="card">
+    <h2>14 derniers jours</h2>
+    <div class="table-scroll">
+        <table class="table wellness-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <?php foreach($questions as $question): ?><th><?=e($question['label'])?></th><?php endforeach; ?>
+                    <th>Cycle</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach($history as $day => $entry): ?>
+                    <tr>
+                        <td><a href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=e($day)?>"><?=e(format_short_date($day))?></a></td>
+                        <?php foreach(array_keys($questions) as $key): ?><td><?=e($entry[$key] ?? '-')?></td><?php endforeach; ?>
+                        <td><?=$entry['menstrual_cycle'] === null ? '-' : ($entry['menstrual_cycle'] ? 'Oui' : 'Non')?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+</section>
+<?php endif; ?>
 <?php
     footer_html();
     exit;
@@ -1472,6 +1657,8 @@ if ($page === 'dashboard') {
                 <textarea id="new-athlete-notes" name="notes" placeholder="Contraintes, blessures, disponibilités..."></textarea>
             </div>
 
+            <?php wellness_tracking_field(false); ?>
+
             <?php if($u['role'] === 'super_admin'): ?>
                 <div class="field">
                     <label>Coach principal</label>
@@ -1627,6 +1814,8 @@ if ($page === 'edit_athlete') {
             <textarea id="athlete-notes" name="notes"><?=e($a['notes'])?></textarea>
         </div>
 
+        <?php wellness_tracking_field(!empty($a['wellness_tracking'])); ?>
+
         <?php if($u['role'] === 'super_admin'): ?>
             <div class="field">
                 <label>Coach principal</label>
@@ -1715,6 +1904,9 @@ if ($page === 'coach_calendar') {
     $dailyDebriefs = $selectedAthleteId > 0
         ? attach_daily_debriefs_to_calendar($selectedAthleteId, $start, $end)
         : [];
+    $periodWellness = $selectedAthleteId > 0 && can_access_athlete($selectedAthleteId)
+        ? get_wellness_between($selectedAthleteId, $start->format('Y-m-d'), $end->format('Y-m-d'))
+        : [];
 
     header_html('Calendrier général');
 
@@ -1784,6 +1976,9 @@ if ($page === 'coach_calendar') {
                 <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Consulter le retour du <?=e(format_full_date($date))?>" title="Retour enregistré">
                     <span class="debrief-dot debrief-debriefed" aria-hidden="true"></span>
                 </a>
+            <?php endif; ?>
+            <?php if(isset($periodWellness[$date])): ?>
+                <a class="wellness-pill" href="index.php?page=wellness&athlete_id=<?=$selectedAthleteId?>&date=<?=$date?>" aria-label="Questionnaire du <?=e(format_full_date($date))?>" title="Questionnaire rempli">♥</a>
             <?php endif; ?>
 
             <?php foreach($daySessions as $s):
@@ -1868,6 +2063,9 @@ if ($page === 'calendar') {
 
     }
     $dailyDebriefs = attach_daily_debriefs_to_calendar($athleteId, $start, $end);
+    $trackingEnabled = !empty($a['wellness_tracking']);
+    $periodWellness = $trackingEnabled ? get_wellness_between($athleteId, $start->format('Y-m-d'), $end->format('Y-m-d')) : [];
+    $todayWellness = $trackingEnabled ? get_daily_wellness($athleteId, date('Y-m-d')) : empty_wellness();
 
     header_html('Calendrier');
 
@@ -1911,6 +2109,27 @@ if ($page === 'calendar') {
         <p class="week-equivalent">Équivalent course semaine : <strong><?=e(format_distance($weekRunEquivalent))?></strong> <small>(4 km vélo = 1 km · 1 km natation = 7 km)</small></p>
     </div>
 </section>
+
+<?php if($trackingEnabled && daily_wellness_ready()): ?>
+<section class="card wellness-today <?=$todayWellness['exists'] ? '' : 'wellness-todo'?>">
+    <div>
+        <h2>Questionnaire du jour</h2>
+        <?php if($todayWellness['exists']): ?>
+            <p class="muted-text">
+                <?php foreach(wellness_questions() as $key => $question): ?>
+                    <?=e($question['label'])?> <strong><?=e($todayWellness[$key] ?? '-')?></strong>/10 ·
+                <?php endforeach; ?>
+                Cycle <strong><?=$todayWellness['menstrual_cycle'] === null ? '-' : ($todayWellness['menstrual_cycle'] ? 'oui' : 'non')?></strong>
+            </p>
+        <?php else: ?>
+            <p class="muted-text"><?=$u['role'] === 'athlete' ? 'Sommeil, énergie, courbatures, stress, motivation : 30 secondes pour renseigner ta forme du jour.' : 'Pas encore rempli aujourd\'hui.'?></p>
+        <?php endif; ?>
+    </div>
+    <a class="btn <?=$todayWellness['exists'] ? 'secondary' : ''?>" href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=date('Y-m-d')?>">
+        <?=$u['role'] === 'athlete' ? ($todayWellness['exists'] ? 'Modifier' : 'Remplir') : 'Voir le suivi'?>
+    </a>
+</section>
+<?php endif; ?>
 
 <details class="card pace-card">
     <summary><h2>Rappel des allures <small class="muted-text">VMA <?=e($a['vma'])?> km/h</small></h2></summary>
@@ -1963,6 +2182,9 @@ if ($page === 'calendar') {
                 <a class="daily-debrief-pill" href="index.php?page=daily_debrief&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Consulter le retour du <?=e(format_full_date($date))?>" title="Retour enregistré">
                     <span class="debrief-dot debrief-debriefed" aria-hidden="true"></span>
                 </a>
+            <?php endif; ?>
+            <?php if(isset($periodWellness[$date])): ?>
+                <a class="wellness-pill" href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=$date?>" aria-label="Questionnaire du <?=e(format_full_date($date))?>" title="Questionnaire rempli">♥</a>
             <?php endif; ?>
 
             <?php foreach($daySessions as $s):
@@ -2191,6 +2413,7 @@ if ($page === 'session') {
             <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
             <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
         </div>
+        <?php debrief_load_summary($debrief); ?>
         <?php if($debrief['result']): ?>
             <div class="detail-item highlight-item"><strong>Chronos / résultat</strong><br><?=nl2br(e($debrief['result']))?></div>
         <?php endif; ?>
@@ -2210,7 +2433,7 @@ if ($page === 'session') {
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="save_debrief">
             <input type="hidden" name="session_id" value="<?=$s['id']?>">
-            <?php debrief_form_fields($debrief); ?>
+            <?php debrief_form_fields($debrief, athlete_tracking_enabled((int)$s['athlete_id'])); ?>
 
             <button class="btn" type="submit">Enregistrer le débrief</button>
         </form>

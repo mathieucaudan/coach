@@ -987,6 +987,111 @@ p{
     min-height:150px
 }
 
+.load-field{
+    display:grid;
+    gap:12px;
+    margin:0;
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:12px
+}
+
+.load-field legend,
+.field-label{
+    color:#253830;
+    font-weight:850
+}
+
+.load-value{
+    display:flex;
+    align-items:center;
+    min-height:44px;
+    color:var(--primary-dark);
+    font-size:22px
+}
+
+.score-field label{
+    display:flex;
+    align-items:baseline;
+    gap:6px
+}
+
+.score-value{
+    margin-left:auto;
+    color:var(--primary-dark);
+    font-size:20px
+}
+
+.field input[type="range"]{
+    min-height:0;
+    padding:0;
+    border:0;
+    box-shadow:none;
+    accent-color:var(--primary)
+}
+
+/* Not answered yet: the thumb sits at the midpoint but nothing is saved. */
+.field input[type="range"]:not([name]){
+    opacity:.45
+}
+
+.choice-row{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+    gap:10px
+}
+
+.wellness-toggle{
+    margin-bottom:14px
+}
+
+.wellness-today{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px
+}
+
+.wellness-today h2{
+    margin-bottom:4px
+}
+
+.wellness-today p{
+    margin:0
+}
+
+.wellness-todo{
+    border-color:#f6d58d;
+    background:#fff9eb
+}
+
+.wellness-table th,
+.wellness-table td{
+    min-width:84px;
+    text-align:center
+}
+
+.wellness-table th:first-child,
+.wellness-table td:first-child{
+    text-align:left
+}
+
+.wellness-pill{
+    width:26px;
+    height:26px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    align-self:flex-start;
+    border:1px solid #fbcfe8;
+    border-radius:999px;
+    background:#fdf2f8;
+    color:#be185d;
+    font-size:13px;
+    text-decoration:none
+}
+
 .weather-options{
     display:grid;
     grid-template-columns:1fr;
@@ -1287,7 +1392,7 @@ p{
     .table{font-size:14px}
     .table th,.table td{min-width:112px;padding:11px}
     .empty-day-action,.session-pill{min-height:40px}
-    .day-add-link,.daily-debrief-pill{width:40px;height:40px;max-width:100%}
+    .day-add-link,.daily-debrief-pill,.wellness-pill{width:40px;height:40px;max-width:100%}
 }
 
 @media(min-width:1200px){
