@@ -612,15 +612,37 @@ function parseDuration(text) {
     if ((m = v.match(/^(\d+)(?:min|mn|m)$/))) return parseInt(m[1], 10);
     return null;
 }
+// Each [data-load] shows minutes × RPE of its [data-load-scope] (or of the whole form).
 function updateLoad(form) {
-    var load = form && form.querySelector('[data-load]');
-    if (!load) return;
-    var duration = parseDuration(form.querySelector('[name=duration_min]').value);
-    var rpe = form.querySelector('[name=rpe]:checked');
-    load.textContent = duration !== null && rpe ? (duration * parseInt(rpe.value, 10)) + ' UA' : '-';
+    if (!form) return;
+    form.querySelectorAll('[data-load]').forEach(function (load) {
+        var scope = load.closest('[data-load-scope]') || form;
+        var durationField = scope.querySelector('[data-duration]');
+        var duration = durationField ? parseDuration(durationField.value) : null;
+        var rpe = scope.querySelector('input[data-rpe]:checked');
+        load.textContent = duration !== null && rpe ? (duration * parseInt(rpe.value, 10)) + ' UA' : '-';
+    });
 }
 </script>
 </body></html>
+<?php
+}
+
+// RPE 1-10 as buttons (same look as the debrief); feeds the live load via data-rpe.
+function rpe_buttons(string $name, ?int $value, string $legend = 'RPE (effort ressenti)'): void {
+?>
+    <fieldset class="difficulty-field">
+        <legend><?=e($legend)?></legend>
+        <div class="difficulty-scale">
+            <?php for($i = 1; $i <= 10; $i++): ?>
+                <label class="difficulty-choice">
+                    <input type="radio" name="<?=e($name)?>" value="<?=$i?>" data-rpe <?=$value === $i ? 'checked' : ''?>>
+                    <span><?=$i?></span>
+                </label>
+            <?php endfor; ?>
+        </div>
+        <p class="scale-help">1 très facile · 5 difficile · 10 effort maximal</p>
+    </fieldset>
 <?php
 }
 
@@ -654,7 +676,7 @@ function debrief_form_fields(array $debrief, array $questions = []): void {
     <div class="form-grid">
         <div class="field">
             <label for="debrief-duration">Temps de séance <small>(ex : 1h15 ou 75)</small></label>
-            <input id="debrief-duration" type="text" autocomplete="off" name="duration_min" placeholder="1h15" value="<?=e($duration === null ? '' : format_duration($duration))?>">
+            <input id="debrief-duration" type="text" autocomplete="off" name="duration_min" data-duration placeholder="1h15" value="<?=e($duration === null ? '' : format_duration($duration))?>">
         </div>
         <div class="field">
             <span class="field-label">Charge (auto)</span>
@@ -663,18 +685,7 @@ function debrief_form_fields(array $debrief, array $questions = []): void {
         </div>
     </div>
 
-    <fieldset class="difficulty-field">
-        <legend>RPE (effort ressenti)</legend>
-        <div class="difficulty-scale">
-            <?php for($i = 1; $i <= 10; $i++): ?>
-                <label class="difficulty-choice">
-                    <input type="radio" name="rpe" value="<?=$i?>" <?=$rpe === $i ? 'checked' : ''?>>
-                    <span><?=$i?></span>
-                </label>
-            <?php endfor; ?>
-        </div>
-        <p class="scale-help">1 très facile · 5 difficile · 10 effort maximal</p>
-    </fieldset>
+    <?php rpe_buttons('rpe', $rpe); ?>
 
     <?php if(($debrief['session_comment'] ?? '') !== ''): ?>
         <div class="field full">
@@ -1374,6 +1385,31 @@ if ($page === 'wellness') {
                 </div>
             </fieldset>
 
+            <?php foreach(wellness_session_slots() as $slot => $slotLabel):
+                $slotLoad = ($wellness[$slot.'_duration_min'] ?? null) !== null && ($wellness[$slot.'_rpe'] ?? null) !== null
+                    ? $wellness[$slot.'_duration_min'] * $wellness[$slot.'_rpe'] : null;
+            ?>
+                <fieldset class="load-field" data-load-scope>
+                    <legend><?=e($slotLabel)?></legend>
+                    <div class="field full">
+                        <label for="wellness-<?=$slot?>-content">Contenu de la séance</label>
+                        <textarea id="wellness-<?=$slot?>-content" name="<?=$slot?>_content" placeholder="Ex : footing 45 min, renfo, vélo..."><?=e($wellness[$slot.'_content'] ?? '')?></textarea>
+                    </div>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="wellness-<?=$slot?>-duration">Durée (min)</label>
+                            <input id="wellness-<?=$slot?>-duration" type="number" inputmode="numeric" min="0" max="1440" step="1" name="<?=$slot?>_duration_min" data-duration value="<?=e($wellness[$slot.'_duration_min'] ?? '')?>">
+                        </div>
+                        <div class="field">
+                            <span class="field-label">Charge (auto)</span>
+                            <strong class="load-value" data-load><?=$slotLoad === null ? '-' : $slotLoad.' UA'?></strong>
+                            <p class="scale-help">Durée × RPE</p>
+                        </div>
+                    </div>
+                    <?php rpe_buttons($slot.'_rpe', $wellness[$slot.'_rpe'] ?? null); ?>
+                </fieldset>
+            <?php endforeach; ?>
+
             <button class="btn" type="submit">Enregistrer le questionnaire</button>
         </form>
     <?php elseif(!$wellness['exists']): ?>
@@ -1391,6 +1427,9 @@ if ($page === 'wellness') {
                     <th>Date</th>
                     <?php foreach($questions as $question): ?><th><?=e($question['label'])?></th><?php endforeach; ?>
                     <th>Cycle</th>
+                    <th>Matin</th>
+                    <th>Après-midi</th>
+                    <th>Charge</th>
                 </tr>
             </thead>
             <tbody>
@@ -1399,6 +1438,11 @@ if ($page === 'wellness') {
                         <td><a href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=e($day)?>"><?=e(format_short_date($day))?></a></td>
                         <?php foreach(array_keys($questions) as $key): ?><td><?=e($entry[$key] ?? '-')?></td><?php endforeach; ?>
                         <td><?=$entry['menstrual_cycle'] === null ? '-' : ($entry['menstrual_cycle'] ? 'Oui' : 'Non')?></td>
+                        <?php foreach(array_keys(wellness_session_slots()) as $slot): ?>
+                            <td><?=($entry[$slot.'_duration_min'] ?? null) !== null ? e($entry[$slot.'_duration_min'].' min · RPE '.($entry[$slot.'_rpe'] ?? '-')) : '-'?></td>
+                        <?php endforeach; ?>
+                        <td><?=e(wellness_day_load($entry) !== null ? wellness_day_load($entry).' UA' : '-')?></td>
+
                     </tr>
                 <?php endforeach; ?>
             </tbody>

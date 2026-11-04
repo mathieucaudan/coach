@@ -1028,12 +1028,36 @@ function daily_wellness_ready(): bool {
     return table_exists('daily_wellness');
 }
 
+// Morning / afternoon sessions logged in the daily questionnaire (content, minutes, RPE 1-10).
+function wellness_session_slots(): array {
+    return ['am' => 'Séance du matin', 'pm' => "Séance de l'après-midi"];
+}
+
+function wellness_slot_columns(): array {
+    $columns = [];
+    foreach (array_keys(wellness_session_slots()) as $slot) {
+        array_push($columns, $slot . '_content', $slot . '_duration_min', $slot . '_rpe');
+    }
+    return $columns;
+}
+
 function empty_wellness(): array {
-    return array_fill_keys(array_keys(wellness_questions()), null) + [
+    return array_fill_keys(array_keys(wellness_questions()), null) + array_fill_keys(wellness_slot_columns(), null) + [
         'menstrual_cycle' => null,
         'updated_at' => null,
         'exists' => false,
     ];
+}
+
+// Day load = sum over morning and afternoon of minutes × RPE.
+function wellness_day_load(array $wellness): ?int {
+    $total = null;
+    foreach (array_keys(wellness_session_slots()) as $slot) {
+        $minutes = $wellness[$slot . '_duration_min'] ?? null;
+        $rpe = $wellness[$slot . '_rpe'] ?? null;
+        if ($minutes !== null && $rpe !== null) $total = ($total ?? 0) + $minutes * $rpe;
+    }
+    return $total;
 }
 
 function normalize_wellness(array $row): array {
@@ -1042,6 +1066,11 @@ function normalize_wellness(array $row): array {
         $wellness[$key] = isset($row[$key]) ? (int)$row[$key] : null;
     }
     $wellness['menstrual_cycle'] = isset($row['menstrual_cycle']) ? (bool)$row['menstrual_cycle'] : null;
+    foreach (array_keys(wellness_session_slots()) as $slot) {
+        $wellness[$slot . '_content'] = (string)($row[$slot . '_content'] ?? '');
+        $wellness[$slot . '_duration_min'] = isset($row[$slot . '_duration_min']) ? (int)$row[$slot . '_duration_min'] : null;
+        $wellness[$slot . '_rpe'] = isset($row[$slot . '_rpe']) ? (int)$row[$slot . '_rpe'] : null;
+    }
     return $wellness;
 }
 
@@ -1085,11 +1114,31 @@ function save_daily_wellness(int $athleteId, string $date, array $post): void {
     $cycle = $post['menstrual_cycle'] ?? '';
     $values[] = $cycle === 'yes' ? 1 : ($cycle === 'no' ? 0 : null);
 
+    $columns = 'athlete_id,date,sleep,energy,soreness,stress,motivation,menstrual_cycle';
+    $placeholders = '?,?,?,?,?,?,?,?';
+    $updates = 'sleep=VALUES(sleep), energy=VALUES(energy), soreness=VALUES(soreness),
+             stress=VALUES(stress), motivation=VALUES(motivation), menstrual_cycle=VALUES(menstrual_cycle)';
+    foreach (array_keys(wellness_session_slots()) as $slot) {
+        $minutes = nullable_int($post[$slot . '_duration_min'] ?? null);
+        $rpe = nullable_int($post[$slot . '_rpe'] ?? null);
+        $slotValues = [
+            $slot . '_content' => trim((string)($post[$slot . '_content'] ?? '')),
+            $slot . '_duration_min' => $minutes === null ? null : max(0, min(1440, $minutes)),
+            $slot . '_rpe' => $rpe === null ? null : max(1, min(10, $rpe)),
+        ];
+        foreach ($slotValues as $column => $value) {
+            if (!table_has_column('daily_wellness', $column)) continue;
+            $columns .= ',' . $column;
+            $placeholders .= ',?';
+            $updates .= ', ' . $column . '=VALUES(' . $column . ')';
+            $values[] = $value;
+        }
+    }
+
     db()->prepare(
-        'INSERT INTO daily_wellness (athlete_id,date,sleep,energy,soreness,stress,motivation,menstrual_cycle,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())
-         ON DUPLICATE KEY UPDATE sleep=VALUES(sleep), energy=VALUES(energy), soreness=VALUES(soreness),
-             stress=VALUES(stress), motivation=VALUES(motivation), menstrual_cycle=VALUES(menstrual_cycle), updated_at=NOW()'
+        'INSERT INTO daily_wellness (' . $columns . ',created_at,updated_at)
+         VALUES (' . $placeholders . ',NOW(),NOW())
+         ON DUPLICATE KEY UPDATE ' . $updates . ', updated_at=NOW()'
     )->execute($values);
 }
 
@@ -1370,6 +1419,14 @@ function run_pending_migrations(): array {
         db_schema(true);
         $applied[] = 'daily_wellness';
     }
+    if (table_exists('daily_wellness')) {
+        foreach (array_keys(wellness_session_slots()) as $slot) {
+            add_column_if_missing('daily_wellness', $slot . '_content', 'TEXT NULL', $applied);
+            add_column_if_missing('daily_wellness', $slot . '_duration_min', 'INT NULL', $applied);
+            add_column_if_missing('daily_wellness', $slot . '_rpe', 'TINYINT UNSIGNED NULL', $applied);
+        }
+    }
+
 
     add_index_if_missing('sessions', 'idx_sessions_athlete_date', 'athlete_id, date', $applied);
     add_index_if_missing('sessions', 'idx_sessions_date', 'date', $applied);
