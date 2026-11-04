@@ -145,6 +145,7 @@ if ($action) {
 
         if (coach_session_field_settings_ready()) {
             save_coach_session_field_visibility((int)$user['id'], $_POST['session_fields'] ?? []);
+            save_coach_debrief_questions((int)$user['id'], (array)($_POST['debrief_questions'] ?? []));
             $_SESSION['success'] = 'Paramètres enregistrés.';
         } else {
             $_SESSION['success'] = 'Paramètres non enregistrés : lance d\'abord la page Migrations.';
@@ -635,12 +636,16 @@ function score_slider(string $id, string $name, string $label, ?int $value, stri
 }
 
 // Time and RPE are part of every debrief: their product is the session load (sRPE).
-function debrief_form_fields(array $debrief): void {
+// $questions: extra questions enabled in the coach's Paramètres (sleep_score, menstrual_cycle).
+function debrief_form_fields(array $debrief, array $questions = []): void {
     $load = debrief_load($debrief);
     $rpe = debrief_rpe($debrief);
     $duration = $debrief['duration_min'] ?? null;
 ?>
     <input type="hidden" name="load_fields" value="1">
+    <?php foreach($questions as $question): ?>
+        <input type="hidden" name="wellness_fields[]" value="<?=e($question)?>">
+    <?php endforeach; ?>
     <div class="field full">
         <label for="debrief-result">Chronos / résultat</label>
         <textarea id="debrief-result" name="result" placeholder="Ex : 10 km en 42'15, footing 1h15 - 14,2 km"><?=e($debrief['result'])?></textarea>
@@ -676,6 +681,21 @@ function debrief_form_fields(array $debrief): void {
             <label for="debrief-session-comment">Commentaire de séance</label>
             <textarea id="debrief-session-comment" name="session_comment"><?=e($debrief['session_comment'])?></textarea>
         </div>
+    <?php endif; ?>
+
+    <?php if(in_array('sleep_score', $questions, true)): ?>
+        <?php score_slider('debrief-sleep', 'sleep_score', 'Score de sommeil', $debrief['sleep_score'] ?? null, '0 très mauvais · 10 excellent'); ?>
+    <?php endif; ?>
+
+    <?php if(in_array('menstrual_cycle', $questions, true)): ?>
+        <fieldset class="difficulty-field">
+            <legend>Menstruations</legend>
+            <div class="settings-grid">
+                <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="yes" <?=($debrief['menstrual_cycle'] ?? null) === true ? 'checked' : ''?>><span>Oui</span></label>
+                <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="no" <?=($debrief['menstrual_cycle'] ?? null) === false ? 'checked' : ''?>><span>Non</span></label>
+                <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="" <?=($debrief['menstrual_cycle'] ?? null) === null ? 'checked' : ''?>><span>Non concerné(e)</span></label>
+            </div>
+        </fieldset>
     <?php endif; ?>
 
     <div class="field full">
@@ -748,6 +768,12 @@ function debrief_summary_html(array $debrief): void {
         <?php endif; ?>
         <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
         <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
+        <?php if(($debrief['sleep_score'] ?? null) !== null): ?>
+            <div class="metric-box"><strong><?=e($debrief['sleep_score'])?>/10</strong><span>Sommeil</span></div>
+        <?php endif; ?>
+        <?php if(($debrief['menstrual_cycle'] ?? null) !== null): ?>
+            <div class="metric-box"><strong><?=$debrief['menstrual_cycle'] ? 'Oui' : 'Non'?></strong><span>Menstruations</span></div>
+        <?php endif; ?>
     </div>
     <?php if($debrief['session_comment'] !== ''): ?>
         <div class="detail-item highlight-item"><strong>Commentaire de séance</strong><br><?=nl2br(e($debrief['session_comment']))?></div>
@@ -1066,6 +1092,7 @@ if ($page === 'coach_settings') {
     $settingsReady = coach_session_field_settings_ready();
     $visibility = get_coach_session_field_visibility((int)$u['id']);
     $fieldOptions = session_field_options();
+    $debriefQuestions = get_coach_debrief_questions((int)$u['id']);
     $success = $_SESSION['success'] ?? null;
     unset($_SESSION['success']);
 
@@ -1103,7 +1130,19 @@ if ($page === 'coach_settings') {
             <?php endforeach; ?>
         </div>
 
+        <h2>Débrief athlète</h2>
+        <p class="muted-text">Questions ajoutées au débrief de tes athlètes (en plus du temps et du RPE).</p>
+        <div class="settings-grid">
+            <?php foreach(debrief_question_options() as $questionKey => $label): ?>
+                <label class="setting-choice">
+                    <input type="checkbox" name="debrief_questions[]" value="<?=e($questionKey)?>" <?=!empty($debriefQuestions[$questionKey]) ? 'checked' : ''?>>
+                    <span><?=e($label)?></span>
+                </label>
+            <?php endforeach; ?>
+        </div>
+
         <button class="btn" type="submit">Enregistrer les paramètres</button>
+
     </form>
 </section>
 <?php
@@ -1254,7 +1293,7 @@ if ($page === 'daily_debrief') {
             <input type="hidden" name="action" value="save_daily_debrief">
             <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
             <input type="hidden" name="date" value="<?=e($date)?>">
-            <?php debrief_form_fields($debrief); ?>
+            <?php debrief_form_fields($debrief, debrief_questions_for_athlete($athleteId)); ?>
             <button class="btn" type="submit">Enregistrer le retour</button>
         </form>
         <?php
@@ -2436,7 +2475,7 @@ if ($page === 'session') {
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="save_debrief">
             <input type="hidden" name="session_id" value="<?=$s['id']?>">
-            <?php debrief_form_fields($debrief); ?>
+            <?php debrief_form_fields($debrief, debrief_questions_for_athlete((int)$s['athlete_id'])); ?>
 
             <button class="btn" type="submit">Enregistrer le débrief</button>
         </form>

@@ -647,7 +647,49 @@ function get_coach_session_field_visibility(int $coachId): array {
     return $visibility;
 }
 
+// Extra questions a coach can add to the athlete debrief form (Paramètres). On by default.
+function debrief_question_options(): array {
+    return [
+        'sleep_score' => 'Score de sommeil (/10)',
+        'menstrual_cycle' => 'Cycle menstruel (Oui / Non)',
+    ];
+}
+
+function get_coach_debrief_questions(int $coachId): array {
+    $questions = array_fill_keys(array_keys(debrief_question_options()), true);
+    if (!coach_session_field_settings_ready()) return $questions;
+
+    $stmt = db()->prepare('SELECT field_key, visible FROM coach_session_field_settings WHERE coach_id=? AND field_key LIKE "debrief_%"');
+    $stmt->execute([$coachId]);
+    foreach ($stmt->fetchAll() as $row) {
+        $key = substr($row['field_key'], strlen('debrief_'));
+        if (array_key_exists($key, $questions)) $questions[$key] = (bool)$row['visible'];
+    }
+    return $questions;
+}
+
+function save_coach_debrief_questions(int $coachId, array $enabled): void {
+    if (!coach_session_field_settings_ready()) return;
+    $stmt = db()->prepare(
+        'INSERT INTO coach_session_field_settings (coach_id, field_key, visible, updated_at)
+         VALUES (?,?,?,NOW())
+         ON DUPLICATE KEY UPDATE visible=VALUES(visible), updated_at=NOW()'
+    );
+    foreach (array_keys(debrief_question_options()) as $key) {
+        $stmt->execute([$coachId, 'debrief_' . $key, in_array($key, $enabled, true) ? 1 : 0]);
+    }
+}
+
+// The athlete's primary coach decides which extra questions the debrief asks.
+function debrief_questions_for_athlete(int $athleteId): array {
+    $stmt = db()->prepare('SELECT coach_id FROM athletes WHERE id=?');
+    $stmt->execute([$athleteId]);
+    $questions = get_coach_debrief_questions((int)$stmt->fetchColumn());
+    return array_keys(array_filter($questions));
+}
+
 function save_coach_session_field_visibility(int $coachId, array $visibleFields): void {
+
     if (!coach_session_field_settings_ready()) return;
 
     $allowed = array_keys(session_field_options());
@@ -677,6 +719,8 @@ function empty_debrief(): array {
         'duration_min' => null,
         'rpe' => null,
         'session_comment' => '',
+        'sleep_score' => null,
+        'menstrual_cycle' => null,
         'created_at' => null,
         'updated_at' => null,
         'exists' => false,
@@ -703,6 +747,8 @@ function normalize_debrief(array $row): array {
         'duration_min' => isset($row['duration_min']) ? (int)$row['duration_min'] : null,
         'rpe' => isset($row['rpe']) ? (int)$row['rpe'] : null,
         'session_comment' => $row['session_comment'] ?? '',
+        'sleep_score' => isset($row['sleep_score']) ? (int)$row['sleep_score'] : null,
+        'menstrual_cycle' => isset($row['menstrual_cycle']) ? (bool)$row['menstrual_cycle'] : null,
         'created_at' => $row['created_at'] ?? null,
         'updated_at' => $row['updated_at'] ?? null,
         'exists' => true,
@@ -893,7 +939,12 @@ function parse_debrief_payload(array $post): array {
     // The single RPE scale also feeds the legacy "difficulté" column (1-10) read by older views.
     if ($difficulty === null && $rpe !== null && $rpe >= 1) $difficulty = $rpe;
 
+    $sleep = nullable_int($post['sleep_score'] ?? null);
+    $cycle = $post['menstrual_cycle'] ?? '';
+
     return [
+        'sleep_score' => $sleep === null ? null : max(0, min(10, $sleep)),
+        'menstrual_cycle' => $cycle === 'yes' ? 1 : ($cycle === 'no' ? 0 : null),
         'duration_min' => $duration === null ? null : max(0, min(1440, $duration)),
         'rpe' => $rpe,
         'session_comment' => trim((string)($post['session_comment'] ?? '')),
@@ -948,6 +999,10 @@ function append_optional_debrief_columns(string $table, array $payload, array $p
     $optional = array_key_exists('actual_distance_km', $post) ? ['actual_distance_km'] : [];
     if (!empty($post['load_fields'])) {
         array_push($optional, 'duration_min', 'rpe', 'session_comment');
+    }
+    // Sleep / cycle are only written when the coach's settings showed them in the form.
+    foreach (array_intersect(array_keys(debrief_question_options()), (array)($post['wellness_fields'] ?? [])) as $question) {
+        $optional[] = $question;
     }
 
     foreach ($optional as $column) {
@@ -1149,6 +1204,8 @@ function run_pending_migrations(): array {
         add_column_if_missing($debriefTable, 'duration_min', 'INT NULL', $applied);
         add_column_if_missing($debriefTable, 'rpe', 'TINYINT UNSIGNED NULL', $applied);
         add_column_if_missing($debriefTable, 'session_comment', 'TEXT NULL', $applied);
+        add_column_if_missing($debriefTable, 'sleep_score', 'TINYINT UNSIGNED NULL', $applied);
+        add_column_if_missing($debriefTable, 'menstrual_cycle', 'TINYINT(1) NULL', $applied);
     }
 
     if (!table_exists('athlete_paces')) {
