@@ -599,12 +599,25 @@ document.addEventListener('input', function (event) {
         var shown = document.getElementById(field.id + '-value');
         if (shown) shown.textContent = field.value;
     }
-    var load = field.form && field.form.querySelector('[data-load]');
-    if (!load) return;
-    var duration = parseInt(field.form.querySelector('[name=duration_min]').value, 10);
-    var rpe = field.form.querySelector('[data-name=rpe]');
-    load.textContent = duration >= 0 && rpe.name ? (duration * parseInt(rpe.value, 10)) + ' UA' : '-';
+    updateLoad(field.form);
 });
+document.addEventListener('change', function (event) { updateLoad(event.target.form); });
+// Same duration formats as the server: 75, 1h15, 1h, 1:15, 45min.
+function parseDuration(text) {
+    var v = String(text || '').toLowerCase().replace(/\s+/g, '');
+    var m;
+    if ((m = v.match(/^(\d+)$/))) return parseInt(m[1], 10);
+    if ((m = v.match(/^(\d+)(?:h|:)(\d{1,2})?(?:min|mn|m)?$/))) return parseInt(m[1], 10) * 60 + parseInt(m[2] || '0', 10);
+    if ((m = v.match(/^(\d+)(?:min|mn|m)$/))) return parseInt(m[1], 10);
+    return null;
+}
+function updateLoad(form) {
+    var load = form && form.querySelector('[data-load]');
+    if (!load) return;
+    var duration = parseDuration(form.querySelector('[name=duration_min]').value);
+    var rpe = form.querySelector('[name=rpe]:checked');
+    load.textContent = duration !== null && rpe ? (duration * parseInt(rpe.value, 10)) + ' UA' : '-';
+}
 </script>
 </body></html>
 <?php
@@ -621,53 +634,49 @@ function score_slider(string $id, string $name, string $label, ?int $value, stri
 <?php
 }
 
-function debrief_form_fields(array $debrief, bool $loadFields = false): void {
-    if ($loadFields):
-        $load = debrief_load($debrief);
+// Time and RPE are part of every debrief: their product is the session load (sRPE).
+function debrief_form_fields(array $debrief): void {
+    $load = debrief_load($debrief);
+    $rpe = debrief_rpe($debrief);
+    $duration = $debrief['duration_min'] ?? null;
 ?>
-    <fieldset class="load-field">
-        <legend>Charge de séance</legend>
-        <input type="hidden" name="load_fields" value="1">
-        <div class="form-grid">
-            <div class="field">
-                <label for="debrief-duration">Durée de séance (min)</label>
-                <input id="debrief-duration" type="number" inputmode="numeric" name="duration_min" min="0" max="1440" step="1" value="<?=e($debrief['duration_min'] ?? '')?>">
-            </div>
-            <div class="field">
-                <span class="field-label">Charge (auto)</span>
-                <strong class="load-value" data-load><?=$load === null ? '-' : $load.' UA'?></strong>
-                <p class="scale-help">Durée × RPE</p>
-            </div>
-        </div>
-        <?php score_slider('debrief-rpe', 'rpe', 'RPE', $debrief['rpe'], '0 repos · 5 difficile · 10 effort maximal'); ?>
-        <div class="field full">
-            <label for="debrief-session-comment">Commentaire de séance</label>
-            <textarea id="debrief-session-comment" name="session_comment"><?=e($debrief['session_comment'])?></textarea>
-        </div>
-    </fieldset>
-<?php endif; ?>
+    <input type="hidden" name="load_fields" value="1">
     <div class="field full">
         <label for="debrief-result">Chronos / résultat</label>
         <textarea id="debrief-result" name="result" placeholder="Ex : 10 km en 42'15, footing 1h15 - 14,2 km"><?=e($debrief['result'])?></textarea>
     </div>
 
-    <div class="field">
-        <label for="debrief-distance">Volume réalisé (km)</label>
-        <input id="debrief-distance" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" name="actual_distance_km" value="<?=e($debrief['actual_distance_km'] ?? '')?>">
+    <div class="form-grid">
+        <div class="field">
+            <label for="debrief-duration">Temps de séance <small>(ex : 1h15 ou 75)</small></label>
+            <input id="debrief-duration" type="text" autocomplete="off" name="duration_min" placeholder="1h15" value="<?=e($duration === null ? '' : format_duration($duration))?>">
+        </div>
+        <div class="field">
+            <span class="field-label">Charge (auto)</span>
+            <strong class="load-value" data-load><?=$load === null ? '-' : $load.' UA'?></strong>
+            <p class="scale-help">Temps (min) × RPE</p>
+        </div>
     </div>
 
     <fieldset class="difficulty-field">
-        <legend>Difficulté</legend>
+        <legend>RPE (effort ressenti)</legend>
         <div class="difficulty-scale">
             <?php for($i = 1; $i <= 10; $i++): ?>
                 <label class="difficulty-choice">
-                    <input type="radio" name="difficulty" value="<?=$i?>" <?=$debrief['difficulty'] === $i ? 'checked' : ''?>>
+                    <input type="radio" name="rpe" value="<?=$i?>" <?=$rpe === $i ? 'checked' : ''?>>
                     <span><?=$i?></span>
                 </label>
             <?php endfor; ?>
         </div>
-        <p class="scale-help">1 très facile · 5 moyen · 10 très difficile</p>
+        <p class="scale-help">1 très facile · 5 difficile · 10 effort maximal</p>
     </fieldset>
+
+    <?php if(($debrief['session_comment'] ?? '') !== ''): ?>
+        <div class="field full">
+            <label for="debrief-session-comment">Commentaire de séance</label>
+            <textarea id="debrief-session-comment" name="session_comment"><?=e($debrief['session_comment'])?></textarea>
+        </div>
+    <?php endif; ?>
 
     <div class="field full">
         <label for="debrief-sensations">Sensations / commentaires / douleurs / gênes</label>
@@ -726,14 +735,19 @@ function debrief_edit_block(bool $exists, string $formHtml, string $deleteConfir
 <?php
 }
 
-function debrief_load_summary(array $debrief): void {
-    if ($debrief['duration_min'] === null && $debrief['rpe'] === null && $debrief['session_comment'] === '') return;
+function debrief_summary_html(array $debrief): void {
     $load = debrief_load($debrief);
+    $rpe = debrief_rpe($debrief);
 ?>
     <div class="debrief-summary">
-        <div class="metric-box"><strong><?=e($debrief['duration_min'] !== null ? $debrief['duration_min'].' min' : '-')?></strong><span>Durée</span></div>
-        <div class="metric-box"><strong><?=e($debrief['rpe'] ?? '-')?>/10</strong><span>RPE</span></div>
-        <div class="metric-box"><strong><?=e($load !== null ? $load.' UA' : '-')?></strong><span>Charge (durée × RPE)</span></div>
+        <div class="metric-box"><strong><?=e(format_duration($debrief['duration_min']))?></strong><span>Temps</span></div>
+        <div class="metric-box"><strong><?=e($rpe ?? '-')?>/10</strong><span>RPE</span></div>
+        <div class="metric-box"><strong><?=e($load !== null ? $load.' UA' : '-')?></strong><span>Charge</span></div>
+        <?php if(($debrief['actual_distance_km'] ?? null) !== null): ?>
+            <div class="metric-box"><strong><?=e(format_distance($debrief['actual_distance_km']))?></strong><span>Volume réalisé</span></div>
+        <?php endif; ?>
+        <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
+        <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
     </div>
     <?php if($debrief['session_comment'] !== ''): ?>
         <div class="detail-item highlight-item"><strong>Commentaire de séance</strong><br><?=nl2br(e($debrief['session_comment']))?></div>
@@ -746,7 +760,7 @@ function wellness_tracking_field(bool $checked): void {
     <div class="wellness-toggle">
         <label class="setting-choice">
             <input type="checkbox" name="wellness_tracking" value="1" <?=$checked ? 'checked' : ''?>>
-            <span>Suivi charge &amp; bien-être <small>(RPE, durée, questionnaire quotidien)</small></span>
+            <span>Questionnaire bien-être quotidien <small>(sommeil, énergie, courbatures, stress, motivation, cycle menstruel)</small></span>
         </label>
         <?php if(!table_has_column('athletes', 'wellness_tracking')): ?>
             <small>Disponible après passage par la page Migrations.</small>
@@ -1223,13 +1237,7 @@ if ($page === 'daily_debrief') {
     <?php endif; ?>
 
     <?php if($debrief['exists']): ?>
-        <div class="debrief-summary">
-            <div class="metric-box"><strong><?=e($debrief['difficulty'] ?: '-')?>/10</strong><span>Difficulté</span></div>
-            <div class="metric-box"><strong><?=e(format_distance($debrief['actual_distance_km']))?></strong><span>Volume réalisé</span></div>
-            <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
-            <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
-        </div>
-        <?php debrief_load_summary($debrief); ?>
+        <?php debrief_summary_html($debrief); ?>
         <?php if($debrief['result']): ?>
             <div class="detail-item highlight-item"><strong>Chronos / résultat</strong><br><?=nl2br(e($debrief['result']))?></div>
         <?php endif; ?>
@@ -1246,7 +1254,7 @@ if ($page === 'daily_debrief') {
             <input type="hidden" name="action" value="save_daily_debrief">
             <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
             <input type="hidden" name="date" value="<?=e($date)?>">
-            <?php debrief_form_fields($debrief, !empty($a['wellness_tracking'])); ?>
+            <?php debrief_form_fields($debrief); ?>
             <button class="btn" type="submit">Enregistrer le retour</button>
         </form>
         <?php
@@ -1657,7 +1665,8 @@ if ($page === 'dashboard') {
                 <textarea id="new-athlete-notes" name="notes" placeholder="Contraintes, blessures, disponibilités..."></textarea>
             </div>
 
-            <?php wellness_tracking_field(false); ?>
+            <?php wellness_tracking_field(true); ?>
+
 
             <?php if($u['role'] === 'super_admin'): ?>
                 <div class="field">
@@ -2122,7 +2131,7 @@ if ($page === 'calendar') {
                 Cycle <strong><?=$todayWellness['menstrual_cycle'] === null ? '-' : ($todayWellness['menstrual_cycle'] ? 'oui' : 'non')?></strong>
             </p>
         <?php else: ?>
-            <p class="muted-text"><?=$u['role'] === 'athlete' ? 'Sommeil, énergie, courbatures, stress, motivation : 30 secondes pour renseigner ta forme du jour.' : 'Pas encore rempli aujourd\'hui.'?></p>
+            <p class="muted-text"><?=$u['role'] === 'athlete' ? 'Sommeil, énergie, courbatures, stress, motivation, cycle : 30 secondes pour renseigner ta forme du jour.' : 'Pas encore rempli aujourd\'hui.'?></p>
         <?php endif; ?>
     </div>
     <a class="btn <?=$todayWellness['exists'] ? 'secondary' : ''?>" href="index.php?page=wellness&athlete_id=<?=$athleteId?>&date=<?=date('Y-m-d')?>">
@@ -2407,13 +2416,7 @@ if ($page === 'session') {
     </div>
 
     <?php if($debrief['exists']): ?>
-        <div class="debrief-summary">
-            <div class="metric-box"><strong><?=e($debrief['difficulty'] ?: '-')?>/10</strong><span>Difficulté</span></div>
-            <div class="metric-box"><strong><?=e(format_distance($debrief['actual_distance_km']))?></strong><span>Volume réalisé</span></div>
-            <div class="metric-box"><strong><?=e($debrief['temperature_c'] !== null ? $debrief['temperature_c'].' °C' : '-')?></strong><span>Température</span></div>
-            <div class="metric-box"><strong><?=e($debrief['lactates'] ?: '-')?></strong><span>Lactates</span></div>
-        </div>
-        <?php debrief_load_summary($debrief); ?>
+        <?php debrief_summary_html($debrief); ?>
         <?php if($debrief['result']): ?>
             <div class="detail-item highlight-item"><strong>Chronos / résultat</strong><br><?=nl2br(e($debrief['result']))?></div>
         <?php endif; ?>
@@ -2433,7 +2436,7 @@ if ($page === 'session') {
             <input type="hidden" name="csrf" value="<?=csrf_token()?>">
             <input type="hidden" name="action" value="save_debrief">
             <input type="hidden" name="session_id" value="<?=$s['id']?>">
-            <?php debrief_form_fields($debrief, athlete_tracking_enabled((int)$s['athlete_id'])); ?>
+            <?php debrief_form_fields($debrief); ?>
 
             <button class="btn" type="submit">Enregistrer le débrief</button>
         </form>

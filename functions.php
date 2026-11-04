@@ -194,7 +194,15 @@ function column_data_type(string $table, string $column): ?string {
     }
 }
 
+function column_default(string $table, string $column): ?string {
+    $stmt = db()->prepare('SELECT COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1');
+    $stmt->execute([$table, $column]);
+    $default = $stmt->fetchColumn();
+    return $default === false || $default === null ? null : trim((string)$default, "'");
+}
+
 function add_column_if_missing(string $table, string $column, string $definition, array &$applied): void {
+
     if (table_has_column($table, $column)) return;
 
     db()->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
@@ -236,7 +244,7 @@ function athlete_select_sql(string $alias = 'a'): string {
         sql_optional('athletes', $alias, 'goal', "''") . ' AS goal',
         sql_optional('athletes', $alias, 'vma', '15') . ' AS vma',
         sql_optional('athletes', $alias, 'notes', "''") . ' AS notes',
-        sql_optional('athletes', $alias, 'wellness_tracking', '0') . ' AS wellness_tracking',
+        sql_optional('athletes', $alias, 'wellness_tracking', '1') . ' AS wellness_tracking',
     ]);
 }
 
@@ -701,13 +709,36 @@ function normalize_debrief(array $row): array {
     ];
 }
 
-// Session load (sRPE method): duration in minutes × RPE, in arbitrary units.
-function debrief_load(array $debrief): ?int {
-    if ($debrief['duration_min'] === null || $debrief['rpe'] === null) return null;
-    return $debrief['duration_min'] * $debrief['rpe'];
+// Accepts "75", "1h15", "1h", "1:15", "45min", "1 h 15 min" and returns minutes.
+function parse_duration_minutes($value): ?int {
+    $value = strtolower(str_replace(' ', '', trim((string)$value)));
+    if ($value === '') return null;
+    if (preg_match('/^(\d+)$/', $value, $m)) return (int)$m[1];
+    if (preg_match('/^(\d+)(?:h|:)(\d{1,2})?(?:min|mn|m)?$/', $value, $m)) return (int)$m[1] * 60 + (int)($m[2] ?? 0);
+    if (preg_match('/^(\d+)(?:min|mn|m)$/', $value, $m)) return (int)$m[1];
+    throw new InvalidArgumentException('Durée non comprise : écris par exemple 1h15 ou 75.');
 }
 
-// Load / wellness tracking is off by default; the coach turns it on per athlete.
+function format_duration($minutes): string {
+    if ($minutes === null || $minutes === '') return '-';
+    $minutes = (int)$minutes;
+    if ($minutes < 60) return $minutes . ' min';
+    return intdiv($minutes, 60) . 'h' . ($minutes % 60 ? str_pad((string)($minutes % 60), 2, '0', STR_PAD_LEFT) : '');
+}
+
+// RPE of older debriefs lives in the "difficulté" column.
+function debrief_rpe(array $debrief): ?int {
+    return $debrief['rpe'] ?? $debrief['difficulty'] ?? null;
+}
+
+// Session load (sRPE method): duration in minutes × RPE, in arbitrary units.
+function debrief_load(array $debrief): ?int {
+    $rpe = debrief_rpe($debrief);
+    if ($debrief['duration_min'] === null || $rpe === null) return null;
+    return $debrief['duration_min'] * $rpe;
+}
+
+// Wellness tracking (daily sleep / cycle questionnaire) is on by default; the coach can turn it off per athlete.
 function athlete_tracking_enabled(int $athleteId): bool {
     if (!table_has_column('athletes', 'wellness_tracking')) return false;
     $stmt = db()->prepare('SELECT wellness_tracking FROM athletes WHERE id=?');
@@ -856,12 +887,15 @@ function parse_debrief_payload(array $post): array {
     $temperature = $post['temperature_c'] ?? null;
     $temperature = ($temperature === '' || $temperature === null) ? null : max(-30, min(55, (float)$temperature));
     $actualDistance = nullable_float($post['actual_distance_km'] ?? null);
-    $duration = nullable_int($post['duration_min'] ?? null);
+    $duration = parse_duration_minutes($post['duration_min'] ?? null);
     $rpe = nullable_int($post['rpe'] ?? null);
+    $rpe = $rpe === null ? null : max(0, min(10, $rpe));
+    // The single RPE scale also feeds the legacy "difficulté" column (1-10) read by older views.
+    if ($difficulty === null && $rpe !== null && $rpe >= 1) $difficulty = $rpe;
 
     return [
         'duration_min' => $duration === null ? null : max(0, min(1440, $duration)),
-        'rpe' => $rpe === null ? null : max(0, min(10, $rpe)),
+        'rpe' => $rpe,
         'session_comment' => trim((string)($post['session_comment'] ?? '')),
         'result' => trim((string)($post['result'] ?? '')),
         'difficulty' => $difficulty,
@@ -910,7 +944,8 @@ function save_daily_debrief(int $athleteId, string $date, array $post): void {
 // Adds the columns older schemas may lack. The load fields are only written when the
 // form showed them, so turning tracking off never wipes values already saved.
 function append_optional_debrief_columns(string $table, array $payload, array $post, string &$columns, string &$placeholders, string &$updates, array &$values): void {
-    $optional = ['actual_distance_km'];
+    // The km field left the debrief form: keep km saved earlier when it is not posted.
+    $optional = array_key_exists('actual_distance_km', $post) ? ['actual_distance_km'] : [];
     if (!empty($post['load_fields'])) {
         array_push($optional, 'duration_min', 'rpe', 'session_comment');
     }
@@ -1080,7 +1115,14 @@ function run_pending_migrations(): array {
         add_column_if_missing('athletes', 'goal', 'TEXT NULL', $applied);
         add_column_if_missing('athletes', 'vma', 'DECIMAL(4,1) NOT NULL DEFAULT 15', $applied);
         add_column_if_missing('athletes', 'notes', 'TEXT NULL', $applied);
-        add_column_if_missing('athletes', 'wellness_tracking', 'TINYINT(1) NOT NULL DEFAULT 0', $applied);
+        add_column_if_missing('athletes', 'wellness_tracking', 'TINYINT(1) NOT NULL DEFAULT 1', $applied);
+        // One-time switch to "on by default": runs only while the column still defaults to 0,
+        // so a coach turning it off for an athlete afterwards is never overridden.
+        if (column_default('athletes', 'wellness_tracking') === '0') {
+            db()->exec('ALTER TABLE athletes ALTER COLUMN wellness_tracking SET DEFAULT 1');
+            db()->exec('UPDATE athletes SET wellness_tracking=1');
+            $applied[] = 'athletes.wellness_tracking (activé par défaut)';
+        }
     }
     // Legacy schemas declare sessions.type as an ENUM, which silently blanks new types like vélo.
     if (table_exists('sessions') && column_data_type('sessions', 'type') === 'enum') {
