@@ -145,7 +145,6 @@ if ($action) {
 
         if (coach_session_field_settings_ready()) {
             save_coach_session_field_visibility((int)$user['id'], $_POST['session_fields'] ?? []);
-            save_coach_debrief_questions((int)$user['id'], (array)($_POST['debrief_questions'] ?? []));
             $_SESSION['success'] = 'Paramètres enregistrés.';
         } else {
             $_SESSION['success'] = 'Paramètres non enregistrés : lance d\'abord la page Migrations.';
@@ -197,8 +196,7 @@ if ($action) {
             'goal' => trim($_POST['goal'] ?? ''),
             'vma' => max(5, min(30, nullable_float($_POST['vma'] ?? null) ?? 15)),
             'notes' => trim($_POST['notes'] ?? ''),
-            'wellness_tracking' => empty($_POST['wellness_tracking']) ? 0 : 1,
-        ]);
+        ] + athlete_followup_values($_POST));
         sync_athlete_coaches($athleteId, $primaryCoachId, nullable_int($_POST['secondary_coach_id'] ?? null));
         sync_athlete_paces($athleteId, $_POST['paces'] ?? []);
         ensure_athlete_paces($athleteId);
@@ -259,8 +257,7 @@ if ($action) {
             'goal' => trim($_POST['goal'] ?? ''),
             'vma' => max(5, min(30, nullable_float($_POST['vma'] ?? null) ?? 15)),
             'notes' => trim($_POST['notes'] ?? ''),
-            'wellness_tracking' => empty($_POST['wellness_tracking']) ? 0 : 1,
-        ], 'id=?', [$id]);
+        ] + athlete_followup_values($_POST), 'id=?', [$id]);
         sync_athlete_coaches($id, $primaryCoachId, $secondaryCoachId);
         sync_athlete_paces($id, $_POST['paces'] ?? []);
         ensure_athlete_paces($id);
@@ -792,17 +789,27 @@ function debrief_summary_html(array $debrief): void {
 <?php
 }
 
-function wellness_tracking_field(bool $checked): void {
+// Per-athlete follow-up settings; $athlete is null on the creation form (everything on).
+function athlete_followup_fields(?array $athlete): void {
+    $questions = $athlete ? athlete_debrief_questions($athlete) : array_keys(debrief_question_options());
+    $tracking = $athlete ? !empty($athlete['wellness_tracking']) : true;
 ?>
-    <div class="wellness-toggle">
+    <fieldset class="wellness-toggle">
+        <legend>Suivi de l'athlète</legend>
         <label class="setting-choice">
-            <input type="checkbox" name="wellness_tracking" value="1" <?=$checked ? 'checked' : ''?>>
-            <span>Questionnaire bien-être quotidien <small>(sommeil, énergie, courbatures, stress, motivation, cycle menstruel)</small></span>
+            <input type="checkbox" name="wellness_tracking" value="1" <?=$tracking ? 'checked' : ''?>>
+            <span>Questionnaire du jour <small>(sommeil, énergie, courbatures, stress, motivation, séances matin / après-midi)</small></span>
         </label>
-        <?php if(!table_has_column('athletes', 'wellness_tracking')): ?>
-            <small>Disponible après passage par la page Migrations.</small>
+        <?php foreach(debrief_question_options() as $key => $label): ?>
+            <label class="setting-choice">
+                <input type="checkbox" name="debrief_questions[]" value="<?=e($key)?>" <?=in_array($key, $questions, true) ? 'checked' : ''?>>
+                <span><?=e($label)?></span>
+            </label>
+        <?php endforeach; ?>
+        <?php if(!table_has_column('athletes', 'debrief_sleep_score')): ?>
+            <small>Enregistré après passage par la page Migrations.</small>
         <?php endif; ?>
-    </div>
+    </fieldset>
 <?php
 }
 
@@ -1103,7 +1110,6 @@ if ($page === 'coach_settings') {
     $settingsReady = coach_session_field_settings_ready();
     $visibility = get_coach_session_field_visibility((int)$u['id']);
     $fieldOptions = session_field_options();
-    $debriefQuestions = get_coach_debrief_questions((int)$u['id']);
     $success = $_SESSION['success'] ?? null;
     unset($_SESSION['success']);
 
@@ -1141,16 +1147,7 @@ if ($page === 'coach_settings') {
             <?php endforeach; ?>
         </div>
 
-        <h2>Débrief athlète</h2>
-        <p class="muted-text">Questions ajoutées au débrief de tes athlètes (en plus du temps et du RPE).</p>
-        <div class="settings-grid">
-            <?php foreach(debrief_question_options() as $questionKey => $label): ?>
-                <label class="setting-choice">
-                    <input type="checkbox" name="debrief_questions[]" value="<?=e($questionKey)?>" <?=!empty($debriefQuestions[$questionKey]) ? 'checked' : ''?>>
-                    <span><?=e($label)?></span>
-                </label>
-            <?php endforeach; ?>
-        </div>
+        <p class="muted-text">Les questions du débrief (sommeil, cycle menstruel) et le questionnaire du jour se règlent pour chaque athlète, dans « Modifier le profil ».</p>
 
         <button class="btn" type="submit">Enregistrer les paramètres</button>
 
@@ -1304,7 +1301,7 @@ if ($page === 'daily_debrief') {
             <input type="hidden" name="action" value="save_daily_debrief">
             <input type="hidden" name="athlete_id" value="<?=$athleteId?>">
             <input type="hidden" name="date" value="<?=e($date)?>">
-            <?php debrief_form_fields($debrief, debrief_questions_for_athlete($athleteId)); ?>
+            <?php debrief_form_fields($debrief, athlete_debrief_questions($a)); ?>
             <button class="btn" type="submit">Enregistrer le retour</button>
         </form>
         <?php
@@ -1376,6 +1373,7 @@ if ($page === 'wellness') {
                 <?php score_slider('wellness-'.$key, $key, $question['label'], $wellness[$key], $question['help']); ?>
             <?php endforeach; ?>
 
+            <?php if(in_array('menstrual_cycle', athlete_debrief_questions($a), true)): ?>
             <fieldset class="load-field">
                 <legend>Cycle menstruel (règles aujourd'hui)</legend>
                 <div class="choice-row">
@@ -1384,6 +1382,7 @@ if ($page === 'wellness') {
                     <label class="setting-choice"><input type="radio" name="menstrual_cycle" value="" <?=$wellness['menstrual_cycle'] === null ? 'checked' : ''?>><span>Non concerné(e)</span></label>
                 </div>
             </fieldset>
+            <?php endif; ?>
 
             <?php foreach(wellness_session_slots() as $slot => $slotLabel):
                 $slotLoad = ($wellness[$slot.'_duration_min'] ?? null) !== null && ($wellness[$slot.'_rpe'] ?? null) !== null
@@ -1748,7 +1747,7 @@ if ($page === 'dashboard') {
                 <textarea id="new-athlete-notes" name="notes" placeholder="Contraintes, blessures, disponibilités..."></textarea>
             </div>
 
-            <?php wellness_tracking_field(true); ?>
+            <?php athlete_followup_fields(null); ?>
 
 
             <?php if($u['role'] === 'super_admin'): ?>
@@ -1906,7 +1905,7 @@ if ($page === 'edit_athlete') {
             <textarea id="athlete-notes" name="notes"><?=e($a['notes'])?></textarea>
         </div>
 
-        <?php wellness_tracking_field(!empty($a['wellness_tracking'])); ?>
+        <?php athlete_followup_fields($a); ?>
 
         <?php if($u['role'] === 'super_admin'): ?>
             <div class="field">
@@ -2211,7 +2210,10 @@ if ($page === 'calendar') {
                 <?php foreach(wellness_questions() as $key => $question): ?>
                     <?=e($question['label'])?> <strong><?=e($todayWellness[$key] ?? '-')?></strong>/10 ·
                 <?php endforeach; ?>
-                Cycle <strong><?=$todayWellness['menstrual_cycle'] === null ? '-' : ($todayWellness['menstrual_cycle'] ? 'oui' : 'non')?></strong>
+                <?php if(in_array('menstrual_cycle', athlete_debrief_questions($a), true)): ?>
+                    Cycle <strong><?=$todayWellness['menstrual_cycle'] === null ? '-' : ($todayWellness['menstrual_cycle'] ? 'oui' : 'non')?></strong>
+                <?php endif; ?>
+
             </p>
         <?php else: ?>
             <p class="muted-text"><?=$u['role'] === 'athlete' ? 'Sommeil, énergie, courbatures, stress, motivation, cycle : 30 secondes pour renseigner ta forme du jour.' : 'Pas encore rempli aujourd\'hui.'?></p>

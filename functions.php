@@ -245,6 +245,8 @@ function athlete_select_sql(string $alias = 'a'): string {
         sql_optional('athletes', $alias, 'vma', '15') . ' AS vma',
         sql_optional('athletes', $alias, 'notes', "''") . ' AS notes',
         sql_optional('athletes', $alias, 'wellness_tracking', '1') . ' AS wellness_tracking',
+        sql_optional('athletes', $alias, 'debrief_sleep_score', '1') . ' AS debrief_sleep_score',
+        sql_optional('athletes', $alias, 'debrief_menstrual_cycle', '1') . ' AS debrief_menstrual_cycle',
     ]);
 }
 
@@ -647,45 +649,36 @@ function get_coach_session_field_visibility(int $coachId): array {
     return $visibility;
 }
 
-// Extra questions a coach can add to the athlete debrief form (Paramètres). On by default.
+// Extra debrief questions, set per athlete in "Modifier le profil" (athletes.debrief_<key>).
+// On by default. The cycle setting also hides the cycle question of the daily questionnaire.
 function debrief_question_options(): array {
     return [
-        'sleep_score' => 'Score de sommeil (/10)',
-        'menstrual_cycle' => 'Cycle menstruel (Oui / Non)',
+        'sleep_score' => 'Score de sommeil dans le débrief (/10)',
+        'menstrual_cycle' => 'Question cycle menstruel (débrief et questionnaire du jour)',
     ];
 }
 
-function get_coach_debrief_questions(int $coachId): array {
-    $questions = array_fill_keys(array_keys(debrief_question_options()), true);
-    if (!coach_session_field_settings_ready()) return $questions;
-
-    $stmt = db()->prepare('SELECT field_key, visible FROM coach_session_field_settings WHERE coach_id=? AND field_key LIKE "debrief_%"');
-    $stmt->execute([$coachId]);
-    foreach ($stmt->fetchAll() as $row) {
-        $key = substr($row['field_key'], strlen('debrief_'));
-        if (array_key_exists($key, $questions)) $questions[$key] = (bool)$row['visible'];
-    }
-    return $questions;
+// $athlete: a row from athlete_select_sql(), which exposes the debrief_<key> flags.
+function athlete_debrief_questions(array $athlete): array {
+    return array_values(array_filter(array_keys(debrief_question_options()), function ($key) use ($athlete) {
+        return !array_key_exists('debrief_' . $key, $athlete) || !empty($athlete['debrief_' . $key]);
+    }));
 }
 
-function save_coach_debrief_questions(int $coachId, array $enabled): void {
-    if (!coach_session_field_settings_ready()) return;
-    $stmt = db()->prepare(
-        'INSERT INTO coach_session_field_settings (coach_id, field_key, visible, updated_at)
-         VALUES (?,?,?,NOW())
-         ON DUPLICATE KEY UPDATE visible=VALUES(visible), updated_at=NOW()'
-    );
-    foreach (array_keys(debrief_question_options()) as $key) {
-        $stmt->execute([$coachId, 'debrief_' . $key, in_array($key, $enabled, true) ? 1 : 0]);
-    }
-}
-
-// The athlete's primary coach decides which extra questions the debrief asks.
 function debrief_questions_for_athlete(int $athleteId): array {
-    $stmt = db()->prepare('SELECT coach_id FROM athletes WHERE id=?');
+    $stmt = db()->prepare('SELECT ' . athlete_select_sql('a') . ' FROM athletes a WHERE a.id=?');
     $stmt->execute([$athleteId]);
-    $questions = get_coach_debrief_questions((int)$stmt->fetchColumn());
-    return array_keys(array_filter($questions));
+    return athlete_debrief_questions($stmt->fetch() ?: []);
+}
+
+// Values to store from the athlete profile form (create / update).
+function athlete_followup_values(array $post): array {
+    $values = ['wellness_tracking' => empty($post['wellness_tracking']) ? 0 : 1];
+    $enabled = (array)($post['debrief_questions'] ?? []);
+    foreach (array_keys(debrief_question_options()) as $key) {
+        $values['debrief_' . $key] = in_array($key, $enabled, true) ? 1 : 0;
+    }
+    return $values;
 }
 
 function save_coach_session_field_visibility(int $coachId, array $visibleFields): void {
@@ -1220,6 +1213,9 @@ function run_pending_migrations(): array {
         add_column_if_missing('athletes', 'vma', 'DECIMAL(4,1) NOT NULL DEFAULT 15', $applied);
         add_column_if_missing('athletes', 'notes', 'TEXT NULL', $applied);
         add_column_if_missing('athletes', 'wellness_tracking', 'TINYINT(1) NOT NULL DEFAULT 1', $applied);
+        add_column_if_missing('athletes', 'debrief_sleep_score', 'TINYINT(1) NOT NULL DEFAULT 1', $applied);
+        add_column_if_missing('athletes', 'debrief_menstrual_cycle', 'TINYINT(1) NOT NULL DEFAULT 1', $applied);
+
         // One-time switch to "on by default": runs only while the column still defaults to 0,
         // so a coach turning it off for an athlete afterwards is never overridden.
         if (column_default('athletes', 'wellness_tracking') === '0') {
